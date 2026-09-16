@@ -42,6 +42,18 @@ class TestILMethods(unittest.TestCase):
         loss0, _ = method.compute_loss(self.model, self.x, self.y, self.criterion, task_id=0)
         method.after_task(task_id=0, model=self.model, train_loader=self.loader)
         self.assertTrue(len(method.fisher_dict) > 0)
+        # Verify complete 5-task Class-Incremental Learning cycle
+        for task_id in range(5):
+            if task_id > 0:
+                self.model.expand_classes(3)
+            n_classes = (task_id + 1) * 3
+            y = torch.randint(0, n_classes, (8,))
+            loader = DataLoader(TabularMalwareDataset(self.x.numpy(), y.numpy()), batch_size=4)
+            loss, d = method.compute_loss(self.model, self.x, y, self.criterion, task_id=task_id)
+            self.assertIn("ewc_loss", d)
+            method.after_task(task_id=task_id, model=self.model, train_loader=loader)
+            self.assertEqual(method.fisher_dict["classifier.weight"].shape[0], n_classes)
+            self.assertEqual(method.optimal_params["classifier.weight"].shape[0], n_classes)
 
         # Task 1
         self.model.expand_classes(3)
@@ -88,6 +100,31 @@ class TestILMethods(unittest.TestCase):
         loss1, d1 = method.compute_loss(self.model, self.x, y1, self.criterion, task_id=1)
         self.assertIn("distill_loss", d1)
         self.assertIn("proto_loss", d1)
+
+    def test_all_methods_multi_task_compatibility(self):
+        """Verify that every IL method can complete 5 sequential tasks without error."""
+        methods = [
+            FineTuneMethod(),
+            JointCumulativeMethod(),
+            EWCMethod(ewc_lambda=50.0),
+            LwFMethod(temperature=2.0, alpha=1.0),
+            ReplayHerdingMethod(buffer_size_per_class=2, use_herding=True),
+            SPCILMethod(lambda_init=0.5, lambda_step=0.1),
+            MALFSILMethod(buffer_size_per_class=2, distill_weight=1.0, proto_weight=0.5),
+        ]
+        for method in methods:
+            model = FCILNet(self.cfg)
+            for task_id in range(5):
+                if task_id > 0:
+                    model.expand_classes(3)
+                n_classes = (task_id + 1) * 3
+                x = torch.randn(8, 20)
+                y = torch.randint(0, n_classes, (8,))
+                loader = DataLoader(TabularMalwareDataset(x.numpy(), y.numpy()), batch_size=4)
+                method.before_task(task_id, model, loader)
+                loss, loss_dict = method.compute_loss(model, x, y, self.criterion, task_id)
+                self.assertGreater(loss.item(), 0.0, f"Method {method.name} produced non-positive loss")
+                method.after_task(task_id, model, loader)
 
 
 if __name__ == "__main__":

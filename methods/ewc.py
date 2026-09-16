@@ -50,9 +50,17 @@ class EWCMethod(BaseILMethod):
                     if param.dim() > 1:
                         diff = param[:min_rows] - p_star[:min_rows]
                         ewc_loss += (f[:min_rows] * (diff ** 2)).sum()
+                    if param.shape == p_star.shape == f.shape:
+                        diff = param - p_star
+                        ewc_loss += (f * (diff ** 2)).sum()
                     else:
                         diff = param[:min_rows] - p_star[:min_rows]
                         ewc_loss += (f[:min_rows] * (diff ** 2)).sum()
+                        # Handle size changes in expanding layers (e.g. classifier head across tasks)
+                        min_rows = min(param.shape[0], p_star.shape[0], f.shape[0])
+                        if min_rows > 0:
+                            diff = param[:min_rows] - p_star[:min_rows]
+                            ewc_loss += (f[:min_rows] * (diff ** 2)).sum()
 
             ewc_loss = (self.ewc_lambda / 2.0) * ewc_loss
 
@@ -115,6 +123,20 @@ class EWCMethod(BaseILMethod):
                     min_r = min(old_f.shape[0], new_f.shape[0])
                     old_f[:min_r] += new_f[:min_r]
                     self.fisher_dict[name] = old_f
+                    if old_f.shape == new_f.shape:
+                        self.fisher_dict[name] = old_f + new_f
+                    elif new_f.shape[0] > old_f.shape[0]:
+                        # Expand historical Fisher tensor to accommodate newly introduced classes
+                        expanded_old = torch.zeros_like(new_f)
+                        expanded_old[:old_f.shape[0]] = old_f
+                        expanded_old += new_f
+                        self.fisher_dict[name] = expanded_old
+                    else:
+                        min_r = min(old_f.shape[0], new_f.shape[0])
+                        old_f[:min_r] += new_f[:min_r]
+                        self.fisher_dict[name] = old_f
+                else:
+                    self.fisher_dict[name] = fisher_accum[name].cpu().clone()
 
         # Save optimal parameters
         self.optimal_params = {name: p.data.cpu().clone() for name, p in model.named_parameters()}
