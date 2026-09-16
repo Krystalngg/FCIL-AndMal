@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 
 from methods.base import BaseILMethod
 from models.fcil_model import FCILNet
+from utils.device import resolve_device
 
 
 class ILMethodStrategyAdapter:
@@ -37,9 +38,7 @@ class ILMethodStrategyAdapter:
         self.il_method = il_method
         self.lr = lr
         self.device_str = device
-        self.device = torch.device(
-            device if torch.cuda.is_available() and device != "cpu" else "cpu"
-        )
+        self.device = resolve_device(device)
         self.classes_per_task = classes_per_task
 
         # FLClient-required attributes

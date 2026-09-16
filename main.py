@@ -320,7 +320,11 @@ def main():
         test_X=test_X,
         test_y=test_y,
         batch_size=exp_cfg.fl.batch_size,
-        device=torch.device(args.device if torch.cuda.is_available() and args.device != "cpu" else "cpu")
+        device=torch.device(
+            "cuda" if (args.device == "cuda" and torch.cuda.is_available())
+            else "mps" if (args.device == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+            else "cpu"
+        )
     )
 
     # Run selected mode
@@ -338,9 +342,12 @@ def main():
             checkpoint_dir=os.path.join(exp_cfg.get_exp_dir(), "checkpoints"),
             logger=logger,
         )
-        global_model = FCILNet(exp_cfg.model).to(
-            torch.device(args.device if torch.cuda.is_available() and args.device != "cpu" else "cpu")
+        resolved_device = torch.device(
+            "cuda" if (args.device == "cuda" and torch.cuda.is_available())
+            else "mps" if (args.device == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+            else "cpu"
         )
+        global_model = FCILNet(exp_cfg.model).to(resolved_device)
         server = FLServer(
             global_model=global_model,
             aggregator=agg,

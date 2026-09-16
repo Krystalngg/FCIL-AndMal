@@ -299,7 +299,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prepared_dir",    default="./prepared_data",     help="Stage 1 prepared data dir")
     p.add_argument("--partition_dir",   default="./fl_data_partitions",help="Stage 2 FL partitions dir")
     p.add_argument("--output_root",     default="./EXPERIMENT",        help="Output root for results")
-    p.add_argument("--device",          default="cpu",                 help="PyTorch device (cpu / cuda)")
+    p.add_argument("--device",          default="cpu",                 help="PyTorch device (cpu / mps / cuda)")
     p.add_argument("--generate_synthetic", action="store_true",
                    help="Generate synthetic data if raw_root is absent")
     p.add_argument("--skip_data_prep",  action="store_true",
