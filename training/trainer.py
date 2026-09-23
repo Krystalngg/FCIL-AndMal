@@ -41,12 +41,14 @@ class CentralizedTrainer:
         full_train_X: Dict[int, Any],  # task_id -> X array
         full_train_y: Dict[int, Any],  # task_id -> y array
         evaluator: ContinualEvaluator,
-        logger: AcademicLogger
+        logger: AcademicLogger,
+        validation_evaluator: Optional[ContinualEvaluator] = None,
     ):
         self.config = config
         self.full_train_X = full_train_X
         self.full_train_y = full_train_y
         self.evaluator = evaluator
+        self.validation_evaluator = validation_evaluator
         self.logger = logger
         if config.fl.batch_size != CENTRALIZED_BATCH_SIZE:
             self.logger.warning(
@@ -207,13 +209,19 @@ class CentralizedTrainer:
 
                 avg_loss = epoch_loss / max(1, epoch_batches)
                 is_final_epoch = ep == epochs_per_task - 1
-                if (ep + 1) % 5 == 0 and not is_final_epoch:
-                    # Interim test every 5 epochs (excluding the final epoch,
-                    # which is handled with confusion matrix after the loop).
-                    interim_metrics = self.evaluator.evaluate_all_seen_tasks(self.model, task_id)
+                if (
+                    (ep + 1) % 5 == 0
+                    and not is_final_epoch
+                    and self.validation_evaluator is not None
+                ):
+                    # Interim monitoring uses validation data only. The held-out
+                    # test split is reserved for one evaluation after each task.
+                    interim_metrics = self.validation_evaluator.evaluate_all_seen_tasks(
+                        self.model, task_id
+                    )
                     context = (
                         f"Centralized Task {task_id + 1} | "
-                        f"Epoch {ep + 1}/{epochs_per_task} | Test"
+                        f"Epoch {ep + 1}/{epochs_per_task} | Validation"
                     )
                     self.logger.info(f"{context} | Loss: {avg_loss:.4f}")
                     self.logger.log_evaluation(
@@ -270,13 +278,19 @@ class CentralizedTrainer:
                 f"Avg Forgetting: {eval_metrics['average_forgetting'] * 100:.2f}%"
             )
 
-            # 7. Track final-epoch and best-performing weight files.
+            # 7. Track the final task checkpoint. Do not select a "best" model
+            # from test Macro-F1; model selection must use validation data.
             checkpoint_paths.append(checkpoint_path)
-            self.checkpoint_mgr.save_best_model(
-                task_id=task_id,
-                macro_f1=eval_metrics["macro_f1"],
-                global_model=self.model
-            )
+            if self.validation_evaluator is not None:
+                validation_metrics = self.validation_evaluator.evaluate_all_seen_tasks(
+                    self.model, task_id
+                )
+                self.checkpoint_mgr.save_best_model(
+                    task_id=task_id,
+                    macro_f1=validation_metrics["macro_f1"],
+                    global_model=self.model,
+                    extra_meta={"selection_split": "validation"},
+                )
             self.logger.log_task_evaluation(task_id, f"Task_{task_id + 1}", eval_metrics)
 
             import gc

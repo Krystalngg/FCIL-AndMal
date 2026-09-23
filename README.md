@@ -41,11 +41,11 @@ FCIL-AndMal/
 │   ├── task_config.py      # 5-Task label map (15 malware/benign classes)
 │   └── paths.py            # Path resolution utilities
 ├── data/                   # Data pipeline & dataset loaders
-│   ├── prepare_dataset.py  # Stage 1: Merge, normalize & stratify held-out test splits
+│   ├── prepare_dataset.py  # Stage 1: validate, train-fit scale & stratify splits
 │   ├── partition.py        # Stage 2: Dirichlet non-IID client partitioning
 │   ├── dataset.py          # PyTorch TabularMalwareDataset & FLTaskDataset loaders
 │   ├── schema.py           # Feature schema validation & metadata cleaning
-│   └── synthetic_generator.py # Synthetic data generator for development/testing
+│   └── synthetic_generator.py # Development/unit-test data only (not benchmark evidence)
 ├── models/                 # Neural architectures & backbones
 │   ├── fcil_model.py       # Primary FCIL model router & feature extractors
 │   ├── backbones.py        # MLP, 1D-CNN, TCN, and Fused backbones
@@ -111,7 +111,7 @@ The 15 standardized classes are partitioned across 5 incremental tasks as follow
 ## 🚀 Data Pipeline Workflow
 
 ### **Stage 1: Prepare Raw Datasets**
-Process raw CSV files, normalize feature columns, align static/dynamic features, and generate stratified held-out test splits:
+Process raw CSV files, validate modality schemas, fit a `StandardScaler` on the training split only, and generate stratified held-out validation/test splits. Real application identity groups are kept in one split when available:
 
 ```bash
 python3 -m data.prepare_dataset \

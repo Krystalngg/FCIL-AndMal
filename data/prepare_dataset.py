@@ -23,6 +23,7 @@ from config import (
     ScenarioConfig,
 )
 from data.schema import drop_raw_metadata, get_feature_columns
+from data.scaling import fit_transform_splits
 
 
 class AndMal2020DataPreparer:
@@ -31,11 +32,21 @@ class AndMal2020DataPreparer:
     Generates unified training pools and independent stratified held-out test sets.
     """
 
-    def __init__(self, raw_root: str, output_dir: str, chunksize: int = 100000, seed: int = 42):
+    def __init__(
+        self,
+        raw_root: str,
+        output_dir: str,
+        chunksize: int = 100000,
+        seed: int = 42,
+        strict_class_coverage: bool = False,
+        data_provenance: str = "user_supplied",
+    ):
         self.raw_root = os.path.abspath(raw_root)
         self.output_dir = os.path.abspath(output_dir)
         self.chunksize = chunksize
         self.seed = seed
+        self.strict_class_coverage = strict_class_coverage
+        self.data_provenance = data_provenance
         self.summary: Dict[str, Any] = {}
 
     def _find_csv_files(self, relative_directories: List[str]) -> List[str]:
@@ -45,6 +56,26 @@ class AndMal2020DataPreparer:
             directory = os.path.join(self.raw_root, relative_directory)
             files.extend(glob.glob(os.path.join(directory, "*.csv")))
         return sorted(set(files))
+
+    @staticmethod
+    def _validate_file_schema(
+        expected_features: Optional[List[str]],
+        df: pd.DataFrame,
+        file_path: str,
+    ) -> List[str]:
+        """Require every source file in one modality to use the same feature order."""
+        features = get_feature_columns(df)
+        if expected_features is None:
+            return features
+        if features != expected_features:
+            missing = [column for column in expected_features if column not in features]
+            unexpected = [column for column in features if column not in expected_features]
+            raise ValueError(
+                f"Feature schema mismatch in {file_path}: missing={missing[:5]}, "
+                f"unexpected={unexpected[:5]}, expected_count={len(expected_features)}, "
+                f"found_count={len(features)}"
+            )
+        return expected_features
 
     def _record_schema(self, df: pd.DataFrame, out_dir: str, feature_type: str) -> None:
         feature_columns = get_feature_columns(df)
@@ -70,6 +101,8 @@ class AndMal2020DataPreparer:
                 "Training can be used as a development run, but it is not a complete "
                 f"{len(ALL_LABELS)}-class experiment."
             )
+            if self.strict_class_coverage:
+                raise ValueError(message)
             warnings.warn(message, RuntimeWarning, stacklevel=2)
             print(f"  [Warning] {message}")
 
@@ -89,23 +122,14 @@ class AndMal2020DataPreparer:
         all_static_files = benign_files + malware_files
 
         if not all_static_files:
-            print(f"  [Notice] No raw static CSV files found in {self.raw_root}/Static/.")
-            print("  [Notice] Auto-generating static benchmark structure into raw_root...")
-            from data.synthetic_generator import generate_synthetic_raw_andmal2020
-            generate_synthetic_raw_andmal2020(root_dir=self.raw_root)
-            benign_files = self._find_csv_files([
-                os.path.join("Static", "CCCS-CIC-Benign-CSVs"),
-                "CCCS-CIC-Benign-CSVs",
-            ])
-            malware_files = self._find_csv_files([
-                os.path.join("Static", "CCCS-CIC-Malicious-CSVs"),
-                "CCCS-CIC-Malicious-CSVs",
-            ])
-            all_static_files = benign_files + malware_files
-            if not all_static_files:
-                raise FileNotFoundError(f"No static CSV files found in {self.raw_root}/Static/...")
+            raise FileNotFoundError(
+                f"No static CSV files found under {self.raw_root}. "
+                "Provide the real CIC-AndMal files or explicitly generate a "
+                "development dataset before running preparation."
+            )
 
         dfs = []
+        expected_features: Optional[List[str]] = None
         for file_path in all_static_files:
             file_name = os.path.basename(file_path)
             stem = os.path.splitext(file_name)[0]
@@ -127,6 +151,9 @@ class AndMal2020DataPreparer:
             file_chunks = []
             for chunk in pd.read_csv(file_path, chunksize=self.chunksize, low_memory=False):
                 chunk = drop_raw_metadata(chunk)
+                expected_features = self._validate_file_schema(
+                    expected_features, chunk, file_path
+                )
                 chunk["label"] = matched_label
                 file_chunks.append(chunk)
             df_file = pd.concat(file_chunks, ignore_index=True)
@@ -174,6 +201,7 @@ class AndMal2020DataPreparer:
             )
 
         dfs = []
+        expected_features: Optional[List[str]] = None
         for file_path in dynamic_files:
             file_name = os.path.basename(file_path)
             # Parse stem, label and reboot phase (e.g. trojan_sms_before_reboot_Cat.csv)
@@ -192,6 +220,9 @@ class AndMal2020DataPreparer:
             file_chunks = []
             for chunk in pd.read_csv(file_path, chunksize=self.chunksize, low_memory=False):
                 chunk = drop_raw_metadata(chunk)
+                expected_features = self._validate_file_schema(
+                    expected_features, chunk, file_path
+                )
                 chunk["label"] = matched_label
                 chunk["reboot_phase"] = phase
                 file_chunks.append(chunk)
@@ -215,11 +246,18 @@ class AndMal2020DataPreparer:
         self._split_and_save(full_df, out_dyn_dir, test_ratio, val_ratio, "dynamic")
         return full_path
 
-    def prepare_fused(self, static_df: Optional[pd.DataFrame] = None, dynamic_df: Optional[pd.DataFrame] = None,
-                      test_ratio: float = 0.2, val_ratio: float = 0.1) -> str:
-        """
-        Merge static and dynamic features on Sample_ID (inner join).
-        Falls back to class-wise alignment if direct Sample_ID matching yields 0 rows.
+    def prepare_fused(
+        self,
+        static_df: Optional[pd.DataFrame] = None,
+        dynamic_df: Optional[pd.DataFrame] = None,
+        test_ratio: float = 0.2,
+        val_ratio: float = 0.1,
+        allow_classwise_alignment: bool = False,
+    ) -> str:
+        """Merge static and dynamic features on a genuine shared Sample_ID.
+
+        Class-conditioned row pairing is disabled by default because it creates
+        synthetic multimodal examples from unrelated applications.
         """
         print("\n[Stage 1] Preparing Fused Multi-Modal Dataset (Static + Dynamic)...")
         if static_df is None:
@@ -240,9 +278,19 @@ class AndMal2020DataPreparer:
         )
 
         if len(merged_df) == 0:
-            print("  [Notice] Direct Sample_ID join resulted in 0 matching samples.")
-            print("  [Notice] Performing class-wise sample alignment to build multi-modal fused dataset...")
-            
+            if not allow_classwise_alignment:
+                raise ValueError(
+                    "Static and dynamic Sample_ID values do not overlap. Refusing "
+                    "class-wise row pairing because it is not valid sample-level "
+                    "multimodal fusion."
+                )
+            warnings.warn(
+                "Class-wise fused alignment is synthetic and development-only.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            print("  [Development] Performing class-wise synthetic alignment...")
+
             shared_labels = sorted(list(set(static_df["label"].astype(str)).intersection(set(dynamic_df["label"].astype(str)))))
             fused_dfs = []
 
@@ -314,19 +362,74 @@ class AndMal2020DataPreparer:
 
         y = df["label"].values
         class_counts = df["label"].value_counts()
-        use_stratify = y if (class_counts.min() >= 2) else None
-
-        # Stratified train vs temp
-        train_df, temp_df = train_test_split(
-            df, test_size=(test_ratio + val_ratio), stratify=use_stratify, random_state=self.seed
-        )
-        # Stratified val vs test
         val_rel_ratio = val_ratio / (test_ratio + val_ratio)
-        temp_class_counts = temp_df["label"].value_counts()
-        temp_stratify = temp_df["label"].values if (temp_class_counts.min() >= 2) else None
 
-        val_df, test_df = train_test_split(
-            temp_df, test_size=(1.0 - val_rel_ratio), stratify=temp_stratify, random_state=self.seed
+        group_column = None
+        if "Split_Group_ID" in df.columns:
+            group_column = "Split_Group_ID"
+        elif "Sample_ID" in df.columns and df["Sample_ID"].duplicated().any():
+            group_column = "Sample_ID"
+
+        if group_column is not None:
+            group_labels = df.groupby(group_column)["label"].nunique()
+            if int(group_labels.max()) > 1:
+                raise ValueError(
+                    f"Split group column {group_column} maps one identity to multiple labels"
+                )
+            groups = (
+                df[[group_column, "label"]]
+                .drop_duplicates(subset=[group_column])
+                .reset_index(drop=True)
+            )
+            group_counts = groups["label"].value_counts()
+            group_stratify = (
+                groups["label"] if int(group_counts.min()) >= 2 else None
+            )
+            train_groups, temp_groups = train_test_split(
+                groups,
+                test_size=(test_ratio + val_ratio),
+                stratify=group_stratify,
+                random_state=self.seed,
+            )
+            temp_counts = temp_groups["label"].value_counts()
+            temp_stratify = (
+                temp_groups["label"] if int(temp_counts.min()) >= 2 else None
+            )
+            val_groups, test_groups = train_test_split(
+                temp_groups,
+                test_size=(1.0 - val_rel_ratio),
+                stratify=temp_stratify,
+                random_state=self.seed,
+            )
+            train_df = df[df[group_column].isin(train_groups[group_column])].copy()
+            val_df = df[df[group_column].isin(val_groups[group_column])].copy()
+            test_df = df[df[group_column].isin(test_groups[group_column])].copy()
+        else:
+            use_stratify = y if (class_counts.min() >= 2) else None
+            train_df, temp_df = train_test_split(
+                df,
+                test_size=(test_ratio + val_ratio),
+                stratify=use_stratify,
+                random_state=self.seed,
+            )
+            temp_class_counts = temp_df["label"].value_counts()
+            temp_stratify = (
+                temp_df["label"].values if (temp_class_counts.min() >= 2) else None
+            )
+            val_df, test_df = train_test_split(
+                temp_df,
+                test_size=(1.0 - val_rel_ratio),
+                stratify=temp_stratify,
+                random_state=self.seed,
+            )
+
+        # Fit preprocessing only on train, then apply the same transform to all splits.
+        # This prevents held-out statistics from entering training or client data.
+        train_df, val_df, test_df = fit_transform_splits(
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+            output_dir=out_dir,
         )
 
         # Save parquet and csv versions
@@ -355,6 +458,8 @@ class AndMal2020DataPreparer:
                 "class_counts_total": counts,
                 "class_counts_train": train_counts,
                 "class_counts_test": test_counts,
+                "split_group_column": group_column,
+                "group_disjoint": group_column is not None,
             }, f, indent=4)
         print(f"  -> Split Summary: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
 
@@ -378,6 +483,18 @@ class AndMal2020DataPreparer:
             json.dump(paths, f, indent=4)
         with open(os.path.join(self.output_dir, "class_coverage.json"), "w") as f:
             json.dump(self.summary, f, indent=2)
+        with open(os.path.join(self.output_dir, "data_provenance.json"), "w") as f:
+            json.dump(
+                {
+                    "source": self.data_provenance,
+                    "raw_root": self.raw_root,
+                    "seed": self.seed,
+                    "strict_class_coverage": self.strict_class_coverage,
+                    "scaling": "train-fitted StandardScaler per feature type",
+                },
+                f,
+                indent=2,
+            )
         print("\n[Stage 1] Completed! dataset_paths.json generated.")
 
 
@@ -391,13 +508,26 @@ def main():
     parser.add_argument("--val_ratio", type=float, default=0.10, help="Held-out validation set ratio")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--summary", action="store_true", help="Print summary of 15 classes")
+    parser.add_argument(
+        "--strict_class_coverage",
+        action="store_true",
+        help="Fail preparation if any configured benchmark class is absent",
+    )
+    parser.add_argument(
+        "--data_provenance",
+        choices=["user_supplied", "synthetic_development"],
+        default="user_supplied",
+        help="Provenance label persisted with prepared artifacts",
+    )
 
     args = parser.parse_args()
     preparer = AndMal2020DataPreparer(
         raw_root=args.root,
         output_dir=args.output_dir,
         chunksize=args.chunksize,
-        seed=args.seed
+        seed=args.seed,
+        strict_class_coverage=args.strict_class_coverage,
+        data_provenance=args.data_provenance,
     )
     preparer.run_all(data_type=args.type, test_ratio=args.test_ratio, val_ratio=args.val_ratio)
     if args.summary:

@@ -115,6 +115,8 @@ class CheckpointManager:
             "best_macro_f1": macro_f1,
             "current_classes": getattr(global_model, "current_classes", 0),
         }
+        if extra_meta:
+            state["selection_metadata"] = extra_meta
         self._atomic_save(state, best_path)
         if self.logger:
             self.logger.info(

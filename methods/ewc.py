@@ -45,22 +45,18 @@ class EWCMethod(BaseILMethod):
                 if name in self.fisher_dict and name in self.optimal_params:
                     f = self.fisher_dict[name].to(device)
                     p_star = self.optimal_params[name].to(device)
-                    # Handle size changes in classifier weights
-                    min_rows = min(param.shape[0], p_star.shape[0])
-                    if param.dim() > 1:
-                        diff = param[:min_rows] - p_star[:min_rows]
-                        ewc_loss += (f[:min_rows] * (diff ** 2)).sum()
-                    if param.shape == p_star.shape == f.shape:
-                        diff = param - p_star
-                        ewc_loss += (f * (diff ** 2)).sum()
-                    else:
-                        diff = param[:min_rows] - p_star[:min_rows]
-                        ewc_loss += (f[:min_rows] * (diff ** 2)).sum()
-                        # Handle size changes in expanding layers (e.g. classifier head across tasks)
-                        min_rows = min(param.shape[0], p_star.shape[0], f.shape[0])
-                        if min_rows > 0:
-                            diff = param[:min_rows] - p_star[:min_rows]
-                            ewc_loss += (f[:min_rows] * (diff ** 2)).sum()
+                    # Penalize each overlapping historical parameter element exactly
+                    # once. Newly added classifier rows have no historical Fisher and
+                    # therefore remain unregularized until the current task completes.
+                    overlap = tuple(
+                        slice(0, min(p_dim, star_dim, fisher_dim))
+                        for p_dim, star_dim, fisher_dim in zip(
+                            param.shape, p_star.shape, f.shape
+                        )
+                    )
+                    if overlap and all(s.stop > 0 for s in overlap):
+                        diff = param[overlap] - p_star[overlap]
+                        ewc_loss += (f[overlap] * diff.pow(2)).sum()
 
             ewc_loss = (self.ewc_lambda / 2.0) * ewc_loss
 
@@ -90,21 +86,22 @@ class EWCMethod(BaseILMethod):
 
         for bx, by in train_loader:
             bx, by = bx.to(device), by.to(device)
-            model.zero_grad()
             logits = model(bx, limit_to_current=True)
             log_probs = F.log_softmax(logits, dim=1)
-            # Sample from model's predictive distribution
+            # Empirical Fisher: accumulate the squared gradient for each
+            # sampled predictive label independently, rather than squaring a
+            # gradient sum across the whole minibatch.
             n_samples = bx.size(0)
             total_samples += n_samples
 
             for i in range(n_samples):
-                label = torch.multinomial(log_probs[i].exp(), 1).squeeze()
+                model.zero_grad()
+                label = torch.multinomial(log_probs[i].detach().exp(), 1).squeeze()
                 loss = -log_probs[i, label]
                 loss.backward(retain_graph=(i < n_samples - 1))
-
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    fisher_accum[name] += param.grad.data ** 2
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        fisher_accum[name] += param.grad.detach().pow(2)
             model.zero_grad()
 
         # Normalize Fisher
@@ -120,21 +117,18 @@ class EWCMethod(BaseILMethod):
                 if name in self.fisher_dict:
                     old_f = self.fisher_dict[name]
                     new_f = fisher_accum[name].cpu()
-                    min_r = min(old_f.shape[0], new_f.shape[0])
-                    old_f[:min_r] += new_f[:min_r]
-                    self.fisher_dict[name] = old_f
-                    if old_f.shape == new_f.shape:
-                        self.fisher_dict[name] = old_f + new_f
-                    elif new_f.shape[0] > old_f.shape[0]:
-                        # Expand historical Fisher tensor to accommodate newly introduced classes
-                        expanded_old = torch.zeros_like(new_f)
-                        expanded_old[:old_f.shape[0]] = old_f
-                        expanded_old += new_f
-                        self.fisher_dict[name] = expanded_old
-                    else:
-                        min_r = min(old_f.shape[0], new_f.shape[0])
-                        old_f[:min_r] += new_f[:min_r]
-                        self.fisher_dict[name] = old_f
+                    target_shape = tuple(
+                        max(old_dim, new_dim)
+                        for old_dim, new_dim in zip(old_f.shape, new_f.shape)
+                    )
+                    accumulated = torch.zeros(
+                        target_shape, dtype=new_f.dtype, device=new_f.device
+                    )
+                    old_slices = tuple(slice(0, size) for size in old_f.shape)
+                    new_slices = tuple(slice(0, size) for size in new_f.shape)
+                    accumulated[old_slices] += old_f.to(new_f.dtype)
+                    accumulated[new_slices] += new_f
+                    self.fisher_dict[name] = accumulated
                 else:
                     self.fisher_dict[name] = fisher_accum[name].cpu().clone()
 

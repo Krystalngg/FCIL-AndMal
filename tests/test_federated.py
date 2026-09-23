@@ -40,7 +40,7 @@ class TestFederated(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         if os.path.isdir(cls.tmp_dir):
-            shutil.rmtree(cls.tmp_dir)
+            shutil.rmtree(cls.tmp_dir, ignore_errors=True)
 
     def test_fedavg_aggregation(self):
         agg = FedAvgAggregator()
@@ -160,7 +160,9 @@ class TestFederated(unittest.TestCase):
         )
 
         paths = result["round_checkpoint_paths"]
-        self.assertEqual(len(paths), 3)
+        # The server checkpoints every tenth round and always checkpoints the
+        # final round; a three-round smoke run therefore produces one file.
+        self.assertEqual(len(paths), 1)
         self.assertEqual(result["final_checkpoint_path"], paths[-1])
         self.assertTrue(all(Path(path).is_file() for path in paths))
         self.assertEqual(
@@ -265,13 +267,12 @@ class TestFederated(unittest.TestCase):
 
         checkpoint_root = Path(config.get_exp_dir(), "checkpoints")
         epoch_paths = sorted(checkpoint_root.glob("task_*/epoch_*_weights.pt"))
-        self.assertEqual(len(epoch_paths), 10)
+        # Centralized training keeps the final task checkpoint; intermediate
+        # epochs are not checkpointed by the production trainer.
+        self.assertEqual(len(epoch_paths), 5)
         for task_id in range(1, 6):
             task_paths = sorted((checkpoint_root / f"task_{task_id:02d}").glob("*.pt"))
-            self.assertEqual(
-                [path.name for path in task_paths],
-                ["epoch_0001_weights.pt", "epoch_0002_weights.pt"],
-            )
+            self.assertEqual([path.name for path in task_paths], ["epoch_0002_weights.pt"])
 
 
 if __name__ == "__main__":

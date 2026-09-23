@@ -100,13 +100,22 @@ def check_dataset(prepared_dir: Path, partition_dir: Path, feature_type: str, cl
     return res
 
 
-def run_stage1(raw_dir: Path, prepared_dir: Path, seed: int, dry: bool) -> bool:
+def run_stage1(
+    raw_dir: Path,
+    prepared_dir: Path,
+    seed: int,
+    dry: bool,
+    synthetic_development: bool = False,
+) -> bool:
     cmd = [
         sys.executable, "-m", "data.prepare_dataset",
         "--root", str(raw_dir),
         "--output_dir", str(prepared_dir),
         "--type", "all",
         "--seed", str(seed),
+        "--strict_class_coverage",
+        "--data_provenance",
+        "synthetic_development" if synthetic_development else "user_supplied",
     ]
     info(f"Stage 1: {' '.join(cmd)}")
     if dry:
@@ -166,7 +175,13 @@ def ensure_dataset(
                     root_dir=str(raw_dir), samples_per_class=350,
                     static_dim=300, dynamic_dim=141, seed=SEED,
                 )
-        if not run_stage1(raw_dir, prepared_dir, SEED, dry):
+        if not run_stage1(
+            raw_dir,
+            prepared_dir,
+            SEED,
+            dry,
+            synthetic_development=generate_synthetic,
+        ):
             raise RuntimeError("Stage 1 preparation FAILED. Aborting.")
         ok("Stage 1 complete.")
     else:
@@ -201,6 +216,7 @@ def build_cmd(
     partition_dir: str,
     feature_type: str,
     backbone: str,
+    raw_root: str,
 ) -> List[str]:
     cmd = [
         sys.executable, "main.py",
@@ -209,6 +225,7 @@ def build_cmd(
         "--backbone", backbone,
         "--method", method,
         "--output_root", output_root,
+        "--raw_root", raw_root,
         "--prepared_dir", prepared_dir,
         "--partition_dir", partition_dir,
         "--n_clients", str(n_clients),
@@ -414,6 +431,7 @@ def main() -> None:
                 partition_dir=str(partition_dir),
                 feature_type=args.feature_type,
                 backbone=backbone,
+                raw_root=str(raw_dir),
             )
 
             success, elapsed = run_experiment(full_case_tag, cmd, log_dir, args.dry_run)

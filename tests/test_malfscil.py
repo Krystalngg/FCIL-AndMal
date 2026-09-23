@@ -15,6 +15,7 @@ from data.dataset import TabularMalwareDataset
 from data.few_shot import build_few_shot_session
 from methods import build_il_method
 from methods.malfscil import MalFSCILMethod
+from methods.malfsil import MALFSILMethod
 from models.fcil_model import FCILNet
 from models.malfscil import PrototypeGraphAttention
 from utils.metrics import compute_fscil_session_metrics
@@ -158,10 +159,12 @@ class TestMalFSCILMethod(unittest.TestCase):
         self.assertEqual(attention.shape, (5, 5))
         self.assertTrue(torch.allclose(attention.sum(dim=1), torch.ones(5)))
 
-    def test_legacy_method_name_resolves_to_malfscil(self):
+    def test_legacy_method_name_remains_distinct_from_malfscil(self):
+        # MALFSIL is the FL-compatible replay/distillation method; MalFSCIL is
+        # the centralized few-shot method and must not be silently aliased.
         config = ILConfig(method_name="malfsil")
-        self.assertEqual(config.method_name, "malfscil")
-        self.assertIsInstance(build_il_method(config), MalFSCILMethod)
+        self.assertEqual(config.method_name, "malfsil")
+        self.assertIsInstance(build_il_method(config), MALFSILMethod)
 
     def test_experiment_config_serializes_fscil_protocol(self):
         config = ExperimentConfig(

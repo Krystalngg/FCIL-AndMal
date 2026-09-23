@@ -35,7 +35,12 @@ from utils.logger import AcademicLogger, get_logger
 from data.synthetic_generator import generate_synthetic_raw_andmal2020
 from data.prepare_dataset import AndMal2020DataPreparer
 from data.partition import FCILDataPartitioner
-from data.dataset import load_heldout_test_set, TabularMalwareDataset, get_participating_clients
+from data.dataset import (
+    load_heldout_test_set,
+    load_prepared_split,
+    TabularMalwareDataset,
+    get_participating_clients,
+)
 from data.schema import get_feature_columns
 from training.evaluator import ContinualEvaluator
 from training.trainer import CentralizedTrainer
@@ -66,7 +71,9 @@ def parse_args():
     parser.add_argument("--partition_dir", type=str, default="./fl_data_partitions",
                         help="Directory for Stage 2 client partition parquet files")
     parser.add_argument("--generate_synthetic", action="store_true", default=False,
-                        help="Generate synthetic CIC-AndMal-2020 raw files if real dataset is not present")
+                        help="Generate synthetic data for development tests only; outputs are not a real CIC-AndMal benchmark")
+    parser.add_argument("--allow_incomplete_benchmark", action="store_true", default=False,
+                        help="Permit missing configured classes (development only; default is fail-fast)")
     parser.add_argument("--prepare_only", action="store_true", default=False,
                         help="Prepare, validate, and partition data without starting training")
 
@@ -216,35 +223,61 @@ def build_configs_from_args(args) -> ExperimentConfig:
     return exp_cfg
 
 
-def ensure_dataset_ready(exp_cfg: ExperimentConfig, generate_synthetic: bool = False) -> None:
-    """
-    Ensure raw data, Stage 1 prepared files, and Stage 2 partitions exist.
-    Generates synthetic data and automated partitions if missing.
+def ensure_dataset_ready(
+    exp_cfg: ExperimentConfig,
+    generate_synthetic: bool = False,
+    allow_incomplete_benchmark: bool = False,
+) -> None:
+    """Ensure raw data, prepared splits, and partitions exist.
+
+    Synthetic data is generated only after explicit opt-in and is marked as a
+    development artifact. Scientific runs fail fast when raw data or benchmark
+    classes are missing.
     """
     raw_root = exp_cfg.scenario.raw_data_dir
     prepared_dir = exp_cfg.scenario.prepared_data_dir
     scenario_dir = exp_cfg.scenario.get_scenario_dir()
-    test_parquet = os.path.join(prepared_dir, exp_cfg.scenario.feature_type, "test.parquet")
+    feature_dir = os.path.join(prepared_dir, exp_cfg.scenario.feature_type)
+    test_parquet = os.path.join(feature_dir, "test.parquet")
+    test_csv = os.path.join(feature_dir, "test.csv")
+    scaler_path = os.path.join(feature_dir, "scaler.joblib")
     partition_table = os.path.join(scenario_dir, "partition_table.csv")
 
-    # Check if raw data exists or if synthetic generation is requested
-    if not os.path.isdir(raw_root) or generate_synthetic:
-        print("\n[Data Pipeline] Raw data directory missing or synthetic flag provided. Generating synthetic dataset...")
+    # Synthetic generation is an explicit development-only action. Never
+    # silently replace a missing scientific dataset with simulated samples.
+    if generate_synthetic:
+        print(
+            "\n[Data Pipeline] Generating explicitly requested SYNTHETIC "
+            "development data. Metrics from this data are not CIC-AndMal "
+            "benchmark evidence."
+        )
         generate_synthetic_raw_andmal2020(
             root_dir=raw_root,
             samples_per_class=350,
             static_dim=300,
             dynamic_dim=141,
-            seed=exp_cfg.seed
+            seed=exp_cfg.seed,
+        )
+    elif not os.path.isdir(raw_root):
+        raise FileNotFoundError(
+            f"Raw dataset directory not found: {raw_root}. Provide the real "
+            "dataset or pass --generate_synthetic for a development-only run."
         )
 
     # Check if Stage 1 prepared data exists
-    if not os.path.isfile(test_parquet):
-        print(f"\n[Data Pipeline] Stage 1 prepared data not found for '{exp_cfg.scenario.feature_type}'. Running preparer...")
+    if not (os.path.isfile(test_parquet) or os.path.isfile(test_csv)) or not os.path.isfile(scaler_path):
+        print(
+            f"\n[Data Pipeline] Prepared '{exp_cfg.scenario.feature_type}' data or "
+            "train-fitted scaler is missing. Running preparer..."
+        )
         preparer = AndMal2020DataPreparer(
             raw_root=raw_root,
             output_dir=prepared_dir,
-            seed=exp_cfg.seed
+            seed=exp_cfg.seed,
+            strict_class_coverage=not allow_incomplete_benchmark,
+            data_provenance=(
+                "synthetic_development" if generate_synthetic else "user_supplied"
+            ),
         )
         preparer.run_all(data_type=exp_cfg.scenario.feature_type)
 
@@ -281,7 +314,11 @@ def main():
     logger.info(f"Target Experiment Directory: {exp_dir}")
 
     # Prepare datasets & partitions
-    ensure_dataset_ready(exp_cfg, generate_synthetic=args.generate_synthetic)
+    ensure_dataset_ready(
+        exp_cfg,
+        generate_synthetic=args.generate_synthetic,
+        allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+    )
 
     # Load Held-Out Global Test Set
     logger.info("Loading central held-out test split for multi-task evaluation...")
@@ -305,10 +342,16 @@ def main():
         f"{exp_cfg.model.input_dim} features, {len(available_labels)} observed classes."
     )
     if missing_labels:
-        logger.warning(
+        message = (
             f"Configured classes absent from the dataset: {missing_labels}. "
             "Results are not a complete 15-class benchmark."
         )
+        if not args.allow_incomplete_benchmark:
+            raise ValueError(
+                f"{message} Re-run only with --allow_incomplete_benchmark for "
+                "an explicitly labeled development experiment."
+            )
+        logger.warning(message)
     if args.prepare_only:
         logger.info(
             "Dataset preparation completed; training was skipped because "
@@ -316,15 +359,27 @@ def main():
         )
         return
 
+    resolved_eval_device = torch.device(
+        "cuda" if (args.device == "cuda" and torch.cuda.is_available())
+        else "mps" if (args.device == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+        else "cpu"
+    )
     evaluator = ContinualEvaluator(
         test_X=test_X,
         test_y=test_y,
         batch_size=exp_cfg.fl.batch_size,
-        device=torch.device(
-            "cuda" if (args.device == "cuda" and torch.cuda.is_available())
-            else "mps" if (args.device == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
-            else "cpu"
-        )
+        device=resolved_eval_device,
+    )
+    val_X, val_y = load_prepared_split(
+        prepared_data_dir=exp_cfg.scenario.prepared_data_dir,
+        feature_type=exp_cfg.scenario.feature_type,
+        split="val",
+    )
+    validation_evaluator = ContinualEvaluator(
+        test_X=val_X,
+        test_y=val_y,
+        batch_size=exp_cfg.fl.batch_size,
+        device=resolved_eval_device,
     )
 
     # Run selected mode
@@ -497,7 +552,8 @@ def main():
             full_train_X=full_train_X,
             full_train_y=full_train_y,
             evaluator=evaluator,
-            logger=logger
+            logger=logger,
+            validation_evaluator=validation_evaluator,
         )
         final_results = trainer.train_all_tasks(epochs_per_task=args.rounds_per_task)
 

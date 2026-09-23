@@ -61,6 +61,22 @@ class TestILMethods(unittest.TestCase):
         loss1, d1 = method.compute_loss(self.model, self.x, y1, self.criterion, task_id=1)
         self.assertIn("ewc_loss", d1)
 
+    def test_ewc_penalty_counts_each_historical_element_once(self):
+        """EWC loss matches a hand-computed overlap penalty after head expansion."""
+        method = EWCMethod(ewc_lambda=2.0)
+        self.model.expand_classes(3)
+        method.fisher_dict = {"classifier.weight": torch.ones_like(self.model.classifier.weight[:3])}
+        method.optimal_params = {
+            "classifier.weight": torch.zeros_like(self.model.classifier.weight[:3])
+        }
+        with torch.no_grad():
+            self.model.classifier.weight[:3].fill_(2.0)
+        _, losses = method.compute_loss(
+            self.model, self.x, self.y, self.criterion, task_id=1
+        )
+        expected = 0.5 * method.ewc_lambda * float((2.0 ** 2) * self.model.classifier.weight[:3].numel())
+        self.assertAlmostEqual(losses["ewc_loss"], expected, places=4)
+
     def test_lwf_pipeline(self):
         method = LwFMethod(temperature=2.0, alpha=1.0)
         method.before_task(task_id=1, model=self.model)

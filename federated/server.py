@@ -249,7 +249,12 @@ class FLServer:
 
         # Expand global model if needed
         if task_id > 0:
-            target_classes = (task_id + 1) * self.config.model.classes_per_task
+            classes_per_task = (
+                self.config.model.classes_per_task
+                if self.config is not None and self.config.model is not None
+                else n_new_classes
+            )
+            target_classes = (task_id + 1) * classes_per_task
             if self.global_model.current_classes < target_classes:
                 needed = target_classes - self.global_model.current_classes
                 if hasattr(self.global_model, 'expand_classes'):

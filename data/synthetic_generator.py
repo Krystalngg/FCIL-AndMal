@@ -1,10 +1,11 @@
-"""
-Synthetic CIC-AndMal-2020 Data Generator.
-Produces realistic synthetic CSV structures matching the exact raw schema, filenames,
-and feature distributions of CCCS-CIC-AndMal-2020 (Static and Dynamic).
-Allows instant academic verification, test suites, and benchmarking.
+"""Synthetic tabular data generator for development and unit tests only.
+
+The generated values are simulations; they are not measured CIC-AndMal-2020
+telemetry and must not be used as evidence for scientific benchmark claims.
 """
 
+import hashlib
+import json
 import os
 import numpy as np
 import pandas as pd
@@ -20,7 +21,7 @@ def generate_synthetic_raw_andmal2020(
     seed: int = 42
 ) -> None:
     """
-    Generate synthetic CIC-AndMal-2020 dataset directory tree with realistic feature statistics.
+    Generate a CIC-AndMal-shaped directory tree for development tests.
     
     Structure:
     raw_data/
@@ -45,7 +46,9 @@ def generate_synthetic_raw_andmal2020(
     os.makedirs(static_malware_dir, exist_ok=True)
     os.makedirs(dynamic_dir, exist_ok=True)
 
-    print(f"[Synthetic Generator] Generating realistic CIC-AndMal-2020 files in {root_dir}...")
+    print(
+        f"[Synthetic Generator] Generating DEVELOPMENT-ONLY simulated files in {root_dir}..."
+    )
 
     # 1. Generate Static Benign Files (Ben0..Ben4)
     benign_samples_per_file = max(samples_per_class // 5, 60)
@@ -71,7 +74,8 @@ def generate_synthetic_raw_andmal2020(
         n_samples = samples_per_class if stem != "Riskware" else samples_per_class * 2  # Riskware is large
         sample_ids = [f"{stem.upper()}_{i:05d}" for i in range(n_samples)]
         # Slightly denser binary features with class-specific bias
-        bias = (hash(stem) % 100) / 1000.0
+        stable_hash = int(hashlib.sha256(stem.encode("utf-8")).hexdigest()[:8], 16)
+        bias = (stable_hash % 100) / 1000.0
         features = np.random.binomial(n=1, p=min(0.12 + bias, 0.4), size=(n_samples, static_dim))
         cols = ["Sample_ID"] + [f"static_feat_{j}" for j in range(static_dim)]
         df = pd.DataFrame(features, columns=cols[1:])
@@ -99,14 +103,31 @@ def generate_synthetic_raw_andmal2020(
                 sample_ids = [f"{matched_stem.upper()}_{i:05d}" for i in range(n_samples)]
 
             # Dynamic numerical features (counts, rates, memory bytes) with class-specific gaussian modes
-            class_mean = (hash(d_stem) % 50) / 10.0 + (1.5 if phase == "after" else 0.5)
+            stable_hash = int(
+                hashlib.sha256(d_stem.encode("utf-8")).hexdigest()[:8], 16
+            )
+            class_mean = (stable_hash % 50) / 10.0 + (1.5 if phase == "after" else 0.5)
             features = np.random.exponential(scale=class_mean, size=(n_samples, dynamic_dim))
             cols = ["Sample_ID"] + [f"dyn_metric_{j}" for j in range(dynamic_dim)]
             df = pd.DataFrame(features, columns=cols[1:])
             df.insert(0, "Sample_ID", sample_ids)
             df.to_csv(file_path, index=False)
 
-    print("[Synthetic Generator] Successfully generated full synthetic CIC-AndMal-2020 tree.")
+    with open(os.path.join(root_dir, "SYNTHETIC_DATASET.json"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "synthetic": True,
+                "intended_use": "development_and_unit_tests_only",
+                "not_valid_for": "CIC-AndMal-2020 benchmark claims",
+                "seed": seed,
+                "samples_per_class": samples_per_class,
+                "static_dim": static_dim,
+                "dynamic_dim": dynamic_dim,
+            },
+            handle,
+            indent=2,
+        )
+    print("[Synthetic Generator] Generated development-only simulated data tree.")
 
 
 if __name__ == "__main__":

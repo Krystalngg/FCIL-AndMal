@@ -139,29 +139,61 @@ def recommend_batch_size(scenario_dir: str, min_batch_size: int = 256) -> int:
     return min_batch_size
 
 
-def load_heldout_test_set(
+def load_prepared_split(
     prepared_data_dir: str,
     feature_type: str = "dynamic",
-    ignore_cols: Optional[List[str]] = None
+    split: str = "test",
+    ignore_cols: Optional[List[str]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Load central held-out test split for global multi-task evaluation.
-    """
+    """Load a prepared train/validation/test split with canonical feature order."""
+    if split not in {"train", "val", "test"}:
+        raise ValueError("split must be one of: train, val, test")
     ignore_cols = ignore_cols or []
-    test_dir = os.path.join(prepared_data_dir, feature_type)
-    parquet_path = os.path.join(test_dir, "test.parquet")
-    csv_path = os.path.join(test_dir, "test.csv")
+    split_dir = os.path.join(prepared_data_dir, feature_type)
+    parquet_path = os.path.join(split_dir, f"{split}.parquet")
+    csv_path = os.path.join(split_dir, f"{split}.csv")
 
     if os.path.isfile(parquet_path):
         df = pd.read_parquet(parquet_path)
     elif os.path.isfile(csv_path):
         df = pd.read_csv(csv_path, low_memory=False)
     else:
-        raise FileNotFoundError(f"Held-out test set not found in {test_dir} (Checked test.parquet and test.csv)")
+        raise FileNotFoundError(
+            f"Prepared {split} split not found in {split_dir} "
+            f"(checked {split}.parquet and {split}.csv)"
+        )
 
     feature_cols = get_feature_columns(df, ignore_cols)
-    X = df[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).values.astype(np.float32)
+    schema_path = os.path.join(split_dir, "scaler_metadata.json")
+    if os.path.isfile(schema_path):
+        with open(schema_path, "r", encoding="utf-8") as handle:
+            expected = json.load(handle).get("feature_columns", [])
+        if feature_cols != expected:
+            raise ValueError(
+                f"Feature schema/order mismatch for {split}: expected "
+                f"{len(expected)} columns, found {len(feature_cols)}"
+            )
+
+    X = (
+        df[feature_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+        .values.astype(np.float32)
+    )
     y_raw = df["label"].values
     y = np.array([LABEL2ID.get(lbl, -1) for lbl in y_raw], dtype=np.int64)
-
     return X, y
+
+
+def load_heldout_test_set(
+    prepared_data_dir: str,
+    feature_type: str = "dynamic",
+    ignore_cols: Optional[List[str]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load the central held-out test split for final reporting."""
+    return load_prepared_split(
+        prepared_data_dir=prepared_data_dir,
+        feature_type=feature_type,
+        split="test",
+        ignore_cols=ignore_cols,
+    )

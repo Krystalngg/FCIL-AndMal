@@ -151,7 +151,13 @@ class TestDataPipeline(unittest.TestCase):
         os.makedirs(fused_prep_dir, exist_ok=True)
         preparer = AndMal2020DataPreparer(self.raw_dir, fused_prep_dir, seed=42)
 
-        fused_path = preparer.prepare_fused(static_df=static_df, dynamic_df=dynamic_df, test_ratio=0.2, val_ratio=0.1)
+        fused_path = preparer.prepare_fused(
+            static_df=static_df,
+            dynamic_df=dynamic_df,
+            test_ratio=0.2,
+            val_ratio=0.1,
+            allow_classwise_alignment=True,
+        )
         self.assertTrue(os.path.isfile(fused_path))
 
         fused_df = pd.read_csv(fused_path)
@@ -198,6 +204,23 @@ class TestDataPipeline(unittest.TestCase):
 
         part_dir = os.path.join(fused_prep_dir, "partitions", "fused", "20clients")
         self.assertTrue(os.path.isfile(os.path.join(part_dir, "metadata.json")))
+
+
+    def test_07_scaler_is_persisted_and_fit_on_train_split(self):
+        """Prepared features are transformed with a train-fitted scaler."""
+        scaler_path = os.path.join(self.prep_dir, "dynamic", "scaler.joblib")
+        metadata_path = os.path.join(self.prep_dir, "dynamic", "scaler_metadata.json")
+        self.assertTrue(os.path.isfile(scaler_path))
+        self.assertTrue(os.path.isfile(metadata_path))
+
+        train = pd.read_csv(os.path.join(self.prep_dir, "dynamic", "train.csv"))
+        test = pd.read_csv(os.path.join(self.prep_dir, "dynamic", "test.csv"))
+        feature_cols = get_feature_columns(train)
+        self.assertEqual(feature_cols, json.load(open(metadata_path))["feature_columns"])
+        train_mean = train[feature_cols].mean().abs().max()
+        self.assertLess(float(train_mean), 1e-4)
+        self.assertEqual(len(train), len(train["label"]))
+        self.assertEqual(len(test), len(test["label"]))
 
 
 if __name__ == "__main__":
