@@ -106,22 +106,29 @@ def run_stage1(
     seed: int,
     dry: bool,
     synthetic_development: bool = False,
+    feature_type: str = "dynamic",
+    allow_incomplete_benchmark: bool = False,
 ) -> bool:
+    stage1_type = feature_type if feature_type in ["static", "dynamic"] else "all"
     cmd = [
         sys.executable, "-m", "data.prepare_dataset",
         "--root", str(raw_dir),
         "--output_dir", str(prepared_dir),
         "--type", "all",
+        "--type", stage1_type,
         "--seed", str(seed),
         "--strict_class_coverage",
         "--data_provenance",
         "synthetic_development" if synthetic_development else "user_supplied",
     ]
+    if not allow_incomplete_benchmark:
+        cmd.append("--strict_class_coverage")
     info(f"Stage 1: {' '.join(cmd)}")
     if dry:
         return True
     r = subprocess.run(cmd)
     return r.returncode == 0
+
 
 
 def run_stage2(prepared_dir: Path, partition_dir: Path, feature_type: str, k: int, seed: int, dry: bool) -> bool:
@@ -153,6 +160,7 @@ def ensure_dataset(
     generate_synthetic: bool,
     skip: bool,
     dry: bool,
+    allow_incomplete_benchmark: bool = False,
 ) -> None:
     section("STAGE 0 — Dataset Integrity Check")
 
@@ -181,6 +189,8 @@ def ensure_dataset(
             SEED,
             dry,
             synthetic_development=generate_synthetic,
+            feature_type=feature_type,
+            allow_incomplete_benchmark=allow_incomplete_benchmark,
         ):
             raise RuntimeError("Stage 1 preparation FAILED. Aborting.")
         ok("Stage 1 complete.")
@@ -217,6 +227,7 @@ def build_cmd(
     feature_type: str,
     backbone: str,
     raw_root: str,
+    allow_incomplete_benchmark: bool = False,
 ) -> List[str]:
     cmd = [
         sys.executable, "main.py",
@@ -233,6 +244,8 @@ def build_cmd(
         "--device", device,
         "--exp_name", case_name,
     ]
+    if allow_incomplete_benchmark:
+        cmd.append("--allow_incomplete_benchmark")
     if mode == "centralized":
         cmd += ["--rounds_per_task", str(CENTRAL_EPOCHS)]
     else:
@@ -316,7 +329,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prepared_dir",    default="./prepared_data",     help="Stage 1 prepared data dir")
     p.add_argument("--partition_dir",   default="./fl_data_partitions",help="Stage 2 FL partitions dir")
     p.add_argument("--output_root",     default="./EXPERIMENT",        help="Output root for results")
-    p.add_argument("--device",          default="cpu",                 help="PyTorch device (cpu / mps / cuda)")
+    p.add_argument("--device",          default="auto",                help="PyTorch device ('auto', 'mps', 'cuda', 'cpu')")
+    p.add_argument("--allow_incomplete_benchmark", action="store_true", default=False,
+                   help="Allow execution when configured classes (e.g. Benign in dynamic) are absent")
     p.add_argument("--generate_synthetic", action="store_true",
                    help="Generate synthetic data if raw_root is absent")
     p.add_argument("--skip_data_prep",  action="store_true",
@@ -336,6 +351,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # Configure Mac MPS environment and resolve accelerator device
+    from utils.device import resolve_device, get_device_info, configure_mps_environment
+    configure_mps_environment()
+    resolved_device = resolve_device(args.device)
+    device_str = str(resolved_device)
+    dev_info = get_device_info()
+
     # Determine backbone default if not specified
     if args.backbone is None:
         if args.feature_type == "fused":
@@ -349,11 +371,18 @@ def main() -> None:
 
     banner("FCIL-AndMal2020 — Full Pipeline Runner")
     info(f"Started  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    info(f"Device   : {args.device}")
+    info(f"Device   : {args.device} -> Resolved: {device_str}")
+    if dev_info.get("mps_available"):
+        ok("Apple Silicon GPU (MPS / Metal) acceleration is ACTIVE")
+    elif dev_info.get("cuda_available"):
+        ok(f"Nvidia CUDA GPU acceleration is ACTIVE ({dev_info.get('cuda_device_name', '')})")
+    else:
+        info("Execution device: CPU")
     info(f"Output   : {args.output_root}")
     info(f"Feature  : {args.feature_type}")
     info(f"Backbone : {backbone}")
     info(f"Clients  : {args.clients} clients scenario(s)")
+
 
     if args.list:
         print(f"\nFeature Type    : {args.feature_type}")
@@ -385,6 +414,7 @@ def main() -> None:
         generate_synthetic=args.generate_synthetic,
         skip=args.skip_data_prep,
         dry=args.dry_run,
+        allow_incomplete_benchmark=args.allow_incomplete_benchmark,
     )
 
     # ── Filter experiments if --only is passed ────────────────────────────
@@ -426,12 +456,13 @@ def main() -> None:
                 n_clients=k_clients,
                 extra=extra,
                 output_root=str(scenario_output_dir),
-                device=args.device,
+                device=device_str,
                 prepared_dir=str(prepared_dir),
                 partition_dir=str(partition_dir),
                 feature_type=args.feature_type,
                 backbone=backbone,
                 raw_root=str(raw_dir),
+                allow_incomplete_benchmark=args.allow_incomplete_benchmark,
             )
 
             success, elapsed = run_experiment(full_case_tag, cmd, log_dir, args.dry_run)

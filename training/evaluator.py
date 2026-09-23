@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from config import TASK_LABEL_MAP, LABEL2ID, ID2LABEL
 from models.fcil_model import FCILNet
 from data.dataset import TabularMalwareDataset
+from utils.device import resolve_device
 from utils.metrics import compute_classification_metrics, ContinualEvaluationMatrix
 
 
@@ -26,12 +27,13 @@ class ContinualEvaluator:
         test_X: np.ndarray,
         test_y: np.ndarray,
         batch_size: int = 512,
-        device: torch.device = torch.device("cpu")
+        device: Any = "auto",
     ):
         self.test_X = test_X
         self.test_y = test_y
         self.batch_size = batch_size
-        self.device = device
+        self.device = resolve_device(device)
+
         self.continual_matrix = ContinualEvaluationMatrix(n_tasks=5)
 
     def evaluate_all_seen_tasks(
@@ -144,11 +146,11 @@ class Evaluator:
     def __init__(
         self,
         model: nn.Module,
-        device: str = 'cuda',
+        device: Any = 'auto',
         n_classes: int = 15
     ):
         self.model = model
-        self.device = device
+        self.device = resolve_device(device)
         self.n_classes = n_classes
 
     def evaluate(

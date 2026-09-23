@@ -4,7 +4,7 @@ Local training for federated learning with incremental learning support.
 
 """
 
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 import copy
 
 import torch
@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from incremental.base_strategy import IncrementalStrategy
+from utils.device import resolve_device
 
 
 class FLClient:
@@ -26,7 +27,7 @@ class FLClient:
         client_id: int,
         model: nn.Module,
         strategy: IncrementalStrategy,
-        device: str = 'cuda'
+        device: Any = 'auto'
     ):
         """Initialize FL Client.
 
@@ -39,7 +40,8 @@ class FLClient:
         self.client_id = client_id
         self.model = model
         self.strategy = strategy
-        self.device = device
+        self.device = resolve_device(device)
+
 
         # Training statistics
         self.n_samples = 0

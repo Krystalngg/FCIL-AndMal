@@ -8,6 +8,7 @@ Learning framework for Android malware detection.
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
+import os
 import json
 
 
@@ -35,7 +36,6 @@ class ScenarioConfig:
 
     def get_scenario_dir(self) -> str:
         """Get output directory path for current scenario."""
-        import os
         return os.path.join(self.output_dir, self.feature_type, f"{self.n_clients}clients")
 
     def get_active_client_count(self, task_id: int) -> int:
@@ -212,11 +212,9 @@ class ExperimentConfig:
             self.exp_name = self.experiment_name
 
     def get_exp_dir(self) -> str:
-        import os
         return os.path.join(self.output_root, self.exp_name)
 
     def save_json(self, path: str) -> None:
-        import json
         with open(path, 'w') as f:
             json.dump(asdict(self), f, indent=2)
 

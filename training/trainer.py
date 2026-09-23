@@ -56,13 +56,9 @@ class CentralizedTrainer:
                 f"overriding {config.fl.batch_size}."
             )
             config.fl.batch_size = CENTRALIZED_BATCH_SIZE
-        dev_cfg = getattr(config.fl, "device", "cpu")
-        if dev_cfg == "cuda" and torch.cuda.is_available():
-            self.device = torch.device("cuda")
-        elif dev_cfg == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            self.device = torch.device("mps")
-        else:
-            self.device = torch.device("cpu")
+        from utils.device import resolve_device
+        dev_cfg = getattr(config.fl, "device", "auto")
+        self.device = resolve_device(dev_cfg)
 
         # Initialize model
         self.model = FCILNet(config.model).to(self.device)

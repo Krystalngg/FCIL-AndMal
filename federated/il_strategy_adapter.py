@@ -31,13 +31,12 @@ class ILMethodStrategyAdapter:
         model: FCILNet,
         il_method: BaseILMethod,
         lr: float = 0.001,
-        device: str = "cpu",
+        device: Any = "auto",
         classes_per_task: int = 3,
     ):
         self.model = model
         self.il_method = il_method
         self.lr = lr
-        self.device_str = device
         self.device = resolve_device(device)
         self.classes_per_task = classes_per_task
 

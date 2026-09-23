@@ -6,6 +6,7 @@ Orchestrates federated learning with incremental tasks.
 
 from typing import Dict, List, Optional, Any
 import copy
+import gc
 
 import torch
 import torch.nn as nn
@@ -13,6 +14,7 @@ import torch.nn as nn
 from federated.client import FLClient
 from federated.aggregators.base import BaseAggregator, FedAvg
 from config import ID2LABEL
+from utils.device import resolve_device
 from utils.metrics import format_classification_metrics, format_confusion_matrix
 
 
@@ -27,7 +29,7 @@ class FLServer:
         self,
         global_model: Optional[nn.Module] = None,
         aggregator: Optional[BaseAggregator] = None,
-        device: str = 'cuda',
+        device: Any = "auto",
         config: Optional[Any] = None,
         evaluator: Optional[Any] = None,
         logger: Optional[Any] = None,
@@ -42,7 +44,8 @@ class FLServer:
         self.logger = logger
         self.checkpoint_manager = checkpoint_manager
         self.aggregator = aggregator or FedAvg()
-        self.device = device
+        self.device = resolve_device(device)
+
 
         # Clients
         self.clients: Dict[int, FLClient] = {}
@@ -126,7 +129,6 @@ class FLServer:
             )
 
         del client_models
-        import gc
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -303,7 +305,6 @@ class FLServer:
                     task_id,
                     train_loader=train_loaders[cid]
                 )
-        import gc
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

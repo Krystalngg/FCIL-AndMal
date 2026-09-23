@@ -8,15 +8,20 @@ import os
 import sys
 import argparse
 import json
+import gc
+import pandas as pd
 
 # Prevent generation of __pycache__ byte-code files
 sys.dont_write_bytecode = True
 
 import torch
 import numpy as np
+from torch.utils.data import DataLoader
 
 # Ensure package path is recognized
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from utils.device import resolve_device, get_device_info, configure_mps_environment
 
 from config import (
     ExperimentConfig,
@@ -118,7 +123,7 @@ def parse_args():
         help="Fixed by mode: federated=256, centralized=1024",
     )
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
-    parser.add_argument("--device", type=str, default="cpu", help="Computation device ('cpu', 'cuda')")
+    parser.add_argument("--device", type=str, default="auto", help="Computation device ('auto', 'mps', 'cuda', 'cpu')")
 
     # Reproducibility & Output
     parser.add_argument("--seed", type=int, default=42, help="Master random seed")
@@ -139,12 +144,16 @@ def build_configs_from_args(args) -> ExperimentConfig:
             "For federated MALFSIL (three-tier: replay+distillation+prototype), "
             "use --method malfsil which is FL-compatible."
         )
+    raw_root = args.raw_root
+    if raw_root == "./raw_data" and not os.path.isdir(raw_root) and os.path.isdir("./Dataset"):
+        raw_root = "./Dataset"
+
     scenario_cfg = ScenarioConfig(
         feature_type=args.feature_type,
         n_clients=args.n_clients,
         dirichlet_alpha=args.dirichlet_alpha,
         seed=args.seed,
-        raw_data_dir=args.raw_root,
+        raw_data_dir=raw_root,
         prepared_data_dir=args.prepared_dir,
         partition_output_dir=args.partition_dir,
     )
@@ -183,6 +192,9 @@ def build_configs_from_args(args) -> ExperimentConfig:
             f"received {args.batch_size}."
         )
 
+    configure_mps_environment()
+    resolved_dev = resolve_device(args.device)
+
     fl_cfg = FLConfig(
         aggregator=args.aggregator,
         n_tasks=5,
@@ -190,7 +202,7 @@ def build_configs_from_args(args) -> ExperimentConfig:
         local_epochs=args.local_epochs,
         batch_size=batch_size,
         lr=args.lr,
-        device=args.device
+        device=str(resolved_dev),
     )
 
     if args.mode == "federated":
@@ -284,7 +296,6 @@ def ensure_dataset_ready(
     # Check if Stage 2 partition files exist
     if not os.path.isfile(partition_table):
         print(f"\n[Data Pipeline] Stage 2 partition table not found at {partition_table}. Running partitioner...")
-        import pandas as pd
         train_path = os.path.join(prepared_dir, exp_cfg.scenario.feature_type, "train.parquet")
         if os.path.isfile(train_path):
             df = pd.read_parquet(train_path)
@@ -359,16 +370,22 @@ def main():
         )
         return
 
-    resolved_eval_device = torch.device(
-        "cuda" if (args.device == "cuda" and torch.cuda.is_available())
-        else "mps" if (args.device == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
-        else "cpu"
-    )
+    configure_mps_environment()
+    resolved_device = resolve_device(args.device)
+    dev_info = get_device_info()
+    logger.info(f"Target Device: {args.device} -> Active: {resolved_device}")
+    if dev_info.get("mps_available"):
+        logger.info("Apple Silicon GPU (MPS / Metal) acceleration is ACTIVE.")
+    elif dev_info.get("cuda_available"):
+        logger.info(f"Nvidia CUDA acceleration is ACTIVE ({dev_info.get('cuda_device_name', '')}).")
+    else:
+        logger.info("Computation running on CPU.")
+
     evaluator = ContinualEvaluator(
         test_X=test_X,
         test_y=test_y,
         batch_size=exp_cfg.fl.batch_size,
-        device=resolved_eval_device,
+        device=resolved_device,
     )
     val_X, val_y = load_prepared_split(
         prepared_data_dir=exp_cfg.scenario.prepared_data_dir,
@@ -379,60 +396,63 @@ def main():
         test_X=val_X,
         test_y=val_y,
         batch_size=exp_cfg.fl.batch_size,
-        device=resolved_eval_device,
+        device=resolved_device,
     )
 
     # Run selected mode
     if args.mode == "federated":
-        import pandas as pd
         from models.fcil_model import FCILNet
         from methods import build_il_method
-        from federated.server import FLServer
         from federated.client import FLClient
         from federated.aggregators import build_aggregator
         from training.checkpoint import CheckpointManager
+        from federated.il_strategy_adapter import ILMethodStrategyAdapter
 
         agg = build_aggregator(args.aggregator)
         ckpt_mgr = CheckpointManager(
             checkpoint_dir=os.path.join(exp_cfg.get_exp_dir(), "checkpoints"),
             logger=logger,
         )
-        resolved_device = torch.device(
-            "cuda" if (args.device == "cuda" and torch.cuda.is_available())
-            else "mps" if (args.device == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
-            else "cpu"
-        )
         global_model = FCILNet(exp_cfg.model).to(resolved_device)
         server = FLServer(
             global_model=global_model,
             aggregator=agg,
-            device=args.device,
+            device=resolved_device,
             config=exp_cfg,
             evaluator=evaluator,
             logger=logger,
             checkpoint_manager=ckpt_mgr,
         )
 
-        from federated.il_strategy_adapter import ILMethodStrategyAdapter
         scenario_dir = exp_cfg.scenario.get_scenario_dir()
-        active_cids = get_participating_clients(scenario_dir, 0)
-        for cid in active_cids:
+
+        def ensure_client_registered(client_id: int) -> None:
+            if client_id in server.clients:
+                return
             client_model = FCILNet(exp_cfg.model)
+            if server.global_model.current_classes > client_model.current_classes:
+                client_model.expand_classes(
+                    server.global_model.current_classes - client_model.current_classes
+                )
             client_il = build_il_method(exp_cfg.il)
             adapter = ILMethodStrategyAdapter(
                 model=client_model,
                 il_method=client_il,
                 lr=exp_cfg.fl.lr,
-                device=args.device,
+                device=resolved_device,
                 classes_per_task=exp_cfg.model.classes_per_task,
             )
             client = FLClient(
-                client_id=cid,
+                client_id=client_id,
                 model=client_model,
                 strategy=adapter,
-                device=args.device,
+                device=resolved_device,
             )
             server.register_client(client)
+
+        active_cids = get_participating_clients(scenario_dir, 0)
+        for cid in active_cids:
+            ensure_client_registered(cid)
         logger.info(f"Registered {len(active_cids)} clients | IL: {args.method.upper()} | Agg: {args.aggregator.upper()}")
 
         all_task_results = []
@@ -443,27 +463,7 @@ def main():
             task_cids = get_participating_clients(scenario_dir, task_id)
             train_loaders = {}
             for cid in task_cids:
-                if cid not in server.clients:
-                    client_model = FCILNet(exp_cfg.model)
-                    if server.global_model.current_classes > client_model.current_classes:
-                        client_model.expand_classes(
-                            server.global_model.current_classes - client_model.current_classes
-                        )
-                    client_il = build_il_method(exp_cfg.il)
-                    adapter = ILMethodStrategyAdapter(
-                        model=client_model,
-                        il_method=client_il,
-                        lr=exp_cfg.fl.lr,
-                        device=args.device,
-                        classes_per_task=exp_cfg.model.classes_per_task,
-                    )
-                    client = FLClient(
-                        client_id=cid,
-                        model=client_model,
-                        strategy=adapter,
-                        device=args.device,
-                    )
-                    server.register_client(client)
+                ensure_client_registered(cid)
                 p_file = os.path.join(scenario_dir, f"task_{task_id}", f"client_{cid:02d}.parquet")
                 c_file = os.path.join(scenario_dir, f"task_{task_id}", f"client_{cid:02d}.csv")
                 df_c = pd.read_parquet(p_file) if os.path.isfile(p_file) else pd.read_csv(c_file)
@@ -471,8 +471,6 @@ def main():
                 X_c = df_c[f_cols].to_numpy(dtype=np.float32, copy=False)
                 y_c = np.array([LABEL2ID.get(lbl, -1) for lbl in df_c["label"].values], dtype=np.int64)
                 del df_c
-                from data.dataset import TabularMalwareDataset
-                from torch.utils.data import DataLoader
                 ds_c = TabularMalwareDataset(X_c, y_c)
                 train_loaders[cid] = DataLoader(ds_c, batch_size=exp_cfg.fl.batch_size, shuffle=True)
 
@@ -495,7 +493,6 @@ def main():
 
             train_loaders.clear()
             del train_loaders
-            import gc
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -524,7 +521,6 @@ def main():
 
     elif args.mode == "centralized":
         # Load centralized task data
-        import pandas as pd
         full_train_X, full_train_y = {}, {}
         scenario_dir = exp_cfg.scenario.get_scenario_dir()
         
@@ -544,7 +540,6 @@ def main():
             full_train_X[t] = X_t
             full_train_y[t] = y_t
             del t_task_dfs, t_df
-            import gc
             gc.collect()
 
         trainer = CentralizedTrainer(

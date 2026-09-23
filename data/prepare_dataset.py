@@ -63,11 +63,11 @@ class AndMal2020DataPreparer:
         df: pd.DataFrame,
         file_path: str,
     ) -> List[str]:
-        """Require every source file in one modality to use the same feature order."""
+        """Require every source file in one modality to use the same feature set."""
         features = get_feature_columns(df)
         if expected_features is None:
             return features
-        if features != expected_features:
+        if set(features) != set(expected_features):
             missing = [column for column in expected_features if column not in features]
             unexpected = [column for column in features if column not in expected_features]
             raise ValueError(
@@ -76,6 +76,16 @@ class AndMal2020DataPreparer:
                 f"found_count={len(features)}"
             )
         return expected_features
+
+    @staticmethod
+    def _align_chunk_columns(chunk: pd.DataFrame, expected_features: List[str]) -> pd.DataFrame:
+        """Align chunk columns so feature columns match expected canonical order."""
+        features = get_feature_columns(chunk)
+        if features == expected_features:
+            return chunk
+        meta_cols = [c for c in chunk.columns if c not in expected_features]
+        return chunk[expected_features + meta_cols]
+
 
     def _record_schema(self, df: pd.DataFrame, out_dir: str, feature_type: str) -> None:
         feature_columns = get_feature_columns(df)
@@ -154,6 +164,7 @@ class AndMal2020DataPreparer:
                 expected_features = self._validate_file_schema(
                     expected_features, chunk, file_path
                 )
+                chunk = self._align_chunk_columns(chunk, expected_features)
                 chunk["label"] = matched_label
                 file_chunks.append(chunk)
             df_file = pd.concat(file_chunks, ignore_index=True)
@@ -200,6 +211,12 @@ class AndMal2020DataPreparer:
                 "AndMal2020-dynamic-BeforeAndAfterReboot/."
             )
 
+        # When real uppercase files exist, exclude synthetic lowercase CSVs
+        uppercase_files = [f for f in dynamic_files if os.path.basename(f)[0].isupper()]
+        if uppercase_files:
+            print(f"  [Stage 1] Real uppercase telemetry detected ({len(uppercase_files)} files). Excluding synthetic lowercase CSVs.")
+            dynamic_files = uppercase_files
+
         dfs = []
         expected_features: Optional[List[str]] = None
         for file_path in dynamic_files:
@@ -223,6 +240,7 @@ class AndMal2020DataPreparer:
                 expected_features = self._validate_file_schema(
                     expected_features, chunk, file_path
                 )
+                chunk = self._align_chunk_columns(chunk, expected_features)
                 chunk["label"] = matched_label
                 chunk["reboot_phase"] = phase
                 file_chunks.append(chunk)

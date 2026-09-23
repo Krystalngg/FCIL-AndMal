@@ -11,12 +11,18 @@ WORKSPACE_PACKAGE_DIR="$(cd "${ROOT_DIR}/.." && pwd)/../.pypackages/lib/python${
 export PYTHONPATH="${WORKSPACE_PACKAGE_DIR}:${ROOT_DIR}:${PYTHONPATH:-}"
 export PYTHONDONTWRITEBYTECODE=1
 
+# macOS Apple Silicon GPU optimization: enable fallback for any ops lacking native MPS kernels
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  export PYTORCH_ENABLE_MPS_FALLBACK=1
+fi
+
 usage() {
   cat <<'EOF'
 Usage:
   ./entrypoint.sh test                         Run the complete test suite.
   ./entrypoint.sh smoke                       Run synthetic development smoke tests.
   ./entrypoint.sh prepare --raw-root PATH     Prepare a real dataset only.
+  ./entrypoint.sh prepare --root PATH         Prepare a real dataset only.
   ./entrypoint.sh experiment [run_all args]   Run the full benchmark runner.
 EOF
 }
@@ -38,6 +44,7 @@ case "${1:-test}" in
   prepare)
     shift
     python3 -m data.prepare_dataset --strict_class_coverage "$@"
+    python3 -m data.prepare_dataset "$@"
     ;;
   experiment)
     shift
