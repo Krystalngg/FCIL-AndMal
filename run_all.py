@@ -58,23 +58,28 @@ def info(text: str) -> None: print(f"  {CYN}→{RST}  {text}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Core 10 Experiments suite
+# Core Experiment Suites (Decoupled Centralized vs Federated)
 # ──────────────────────────────────────────────────────────────────────────────
 # Each entry: (case_name, mode, method, aggregator_or_None, extra_kwargs)
-CORE_EXPERIMENTS: List[Tuple] = [
-    # ── Centralized (4 cases) ──────────────────────────────────────────────
-    ("Centralized_EWCDR",   "centralized", "ewc",     None,      {"ewc_lambda": 5000.0}),
-    ("Centralized_MES",     "centralized", "replay",  None,      {"buffer_size": 20}),
-    ("Centralized_SPCIL",   "centralized", "spcil",   None,      {}),
-    ("Centralized_MALFSIL", "centralized", "malfsil", None,      {}),
-    # ── Federated (6 cases) ────────────────────────────────────────────────
-    ("FL_EWCDR",            "federated",   "ewc",     "fedavg",  {"ewc_lambda": 5000.0}),
-    ("FL_MES",              "federated",   "replay",  "fedavg",  {"buffer_size": 20}),
-    ("FL_SPCIL",            "federated",   "spcil",   "fedavg",  {}),
-    ("FL_MALFSIL",          "federated",   "malfsil", "fedavg",  {}),
-    ("FL_FedAvg",           "federated",   "finetune","fedavg",  {}),
-    ("FL_FedNova",          "federated",   "finetune","fednova", {}),
+CENTRALIZED_EXPERIMENTS: List[Tuple] = [
+    ("Centralized_FineTune", "centralized", "finetune", None,      {}),
+    ("Centralized_EWCDR",    "centralized", "ewc",      None,      {"ewc_lambda": 5000.0}),
+    ("Centralized_MES",      "centralized", "replay",   None,      {"buffer_size": 20}),
+    ("Centralized_SPCIL",    "centralized", "spcil",    None,      {}),
+    ("Centralized_MALFSIL",  "centralized", "malfsil",  None,      {}),
 ]
+
+FEDERATED_EXPERIMENTS: List[Tuple] = [
+    ("FL_FedAvg",           "federated",   "finetune", "fedavg",  {}),
+    ("FL_FedNova",          "federated",   "finetune", "fednova", {}),
+    ("FL_EWCDR",            "federated",   "ewc",      "fedavg",  {"ewc_lambda": 5000.0}),
+    ("FL_MES",              "federated",   "replay",   "fedavg",  {"buffer_size": 20}),
+    ("FL_SPCIL",            "federated",   "spcil",    "fedavg",  {}),
+    ("FL_MALFSIL",          "federated",   "malfsil",  "fedavg",  {}),
+]
+
+# Legacy alias for backward compatibility
+CORE_EXPERIMENTS = CENTRALIZED_EXPERIMENTS + FEDERATED_EXPERIMENTS
 
 # Fixed hyper-parameters per spec
 CENTRAL_EPOCHS  = 250
@@ -340,6 +345,8 @@ def parse_args() -> argparse.Namespace:
         description="FCIL-AndMal full pipeline runner (dataset check + 10 experiments per client scenario)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    p.add_argument("--mode",             type=str, choices=["all", "centralized", "federated"], default="all",
+                   help="Execution paradigm: 'centralized' (single server K=N/A), 'federated' (multi-client FL), or 'all'")
     p.add_argument("--clients",          type=int, nargs="+", default=[20, 50],
                    help="Client count scenarios to run (e.g. --clients 20 50 or --clients 20)")
     p.add_argument("--feature_type",     type=str, choices=["dynamic", "static", "fused"], default="dynamic",
@@ -408,15 +415,20 @@ def main() -> None:
 
 
     if args.list:
-        print(f"\nFeature Type    : {args.feature_type}")
-        print(f"Backbone        : {backbone}")
-        print(f"Client Scenarios: {args.clients}")
-        print("\nCore Experiment Suite (10 cases executed per client scenario):")
-        for idx, (name, mode, method, agg, _) in enumerate(CORE_EXPERIMENTS, 1):
-            print(f"  [{idx:02d}] {name:<26}  mode={mode:<12} method={method:<10} agg={agg or 'N/A'}")
-        total_runs = len(args.clients) * len(CORE_EXPERIMENTS)
-        print(f"\nTotal runs across all client scenarios: {total_runs} runs "
-              f"({len(CORE_EXPERIMENTS)} cases × {len(args.clients)} scenario(s): {args.clients})")
+        print(f"\nExecution Mode   : {args.mode.upper()}")
+        print(f"Feature Type     : {args.feature_type}")
+        print(f"Backbone         : {backbone}")
+        print(f"Client Scenarios : {args.clients}")
+        
+        if args.mode in ["all", "centralized"]:
+            print(f"\nCentralized Suite ({len(CENTRALIZED_EXPERIMENTS)} cases, executed once into output_root/centralized/):")
+            for idx, (name, mode, method, agg, _) in enumerate(CENTRALIZED_EXPERIMENTS, 1):
+                print(f"  [{idx:02d}] {name:<26}  mode={mode:<12} method={method:<10} agg={agg or 'N/A'}")
+                
+        if args.mode in ["all", "federated"]:
+            print(f"\nFederated Suite ({len(FEDERATED_EXPERIMENTS)} cases per client scenario into output_root/{{k}}clients/):")
+            for idx, (name, mode, method, agg, _) in enumerate(FEDERATED_EXPERIMENTS, 1):
+                print(f"  [{idx:02d}] {name:<26}  mode={mode:<12} method={method:<10} agg={agg or 'N/A'}")
         return
 
     # Auto-detect raw data directory if default ./raw_data does not exist but ./Dataset exists
@@ -433,97 +445,183 @@ def main() -> None:
     ensure_dataset(
         raw_dir, prepared_dir, partition_dir,
         feature_type=args.feature_type,
-        clients_list=args.clients,
+        clients_list=args.clients if args.mode in ["all", "federated"] else [],
         generate_synthetic=args.generate_synthetic,
         skip=args.skip_data_prep,
         dry=args.dry_run,
         allow_incomplete_benchmark=args.allow_incomplete_benchmark,
     )
 
-    # ── Filter experiments if --only is passed ────────────────────────────
-    experiments = CORE_EXPERIMENTS
-    if args.only:
-        experiments = [e for e in experiments if args.only.lower() in e[0].lower()]
-        if not experiments:
-            err(f"No experiments match --only '{args.only}'")
-            sys.exit(1)
-        warn(f"Filtered to {len(experiments)} core experiment(s) matching '{args.only}'")
-
     overall_all_passed = True
     overall_summary = {}
 
-    # ── Iterate over Client Scenarios ─────────────────────────────────────
-    for k_clients in args.clients:
-        scenario_title = f"{k_clients} Clients Scenario ({args.feature_type.upper()})"
-        banner(f"RUNNING SCENARIO: {scenario_title.upper()} ({len(experiments)} Cases)")
-        
-        scenario_output_dir = output_root / f"{k_clients}clients"
-        log_dir = scenario_output_dir / "_logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
+    # ──────────────────────────────────────────────────────────────────────────
+    # 1. Centralized Paradigm Execution (Client-Independent, K = N/A)
+    # ──────────────────────────────────────────────────────────────────────────
+    if args.mode in ["all", "centralized"]:
+        cent_exps = CENTRALIZED_EXPERIMENTS
+        if args.only:
+            cent_exps = [e for e in cent_exps if args.only.lower() in e[0].lower()]
 
-        scenario_results = []
+        if cent_exps:
+            scenario_title = f"Centralized Paradigm ({args.feature_type.upper()})"
+            banner(f"RUNNING CENTRALIZED PARADIGM ({len(cent_exps)} Cases — K=N/A)")
+            scenario_output_dir = output_root / "centralized"
+            log_dir = scenario_output_dir / "_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            scenario_results = []
 
-        for idx, (case_name, mode, method, agg, extra) in enumerate(experiments, 1):
-            full_case_tag = f"{case_name}_K{k_clients}" if mode == "federated" else case_name
-            section(f"[{idx}/{len(experiments)}] {full_case_tag} (K={k_clients})")
-            info(f"mode={mode}  method={method}  aggregator={agg}  clients={k_clients}")
-            info(f"{'epochs' if mode=='centralized' else 'rounds'}/task="
-                 f"{CENTRAL_EPOCHS if mode=='centralized' else FL_ROUNDS}"
-                 + (f"  local_epochs={FL_LOCAL_EPOCHS}" if mode == "federated" else ""))
+            for idx, (case_name, mode, method, agg, extra) in enumerate(cent_exps, 1):
+                section(f"[{idx}/{len(cent_exps)}] {case_name} (Centralized Single-Server)")
+                info(f"mode={mode}  method={method}  aggregator=N/A  epochs/task={CENTRAL_EPOCHS}")
 
-            if args.skip_completed and is_experiment_completed(scenario_output_dir, full_case_tag):
-                ok(f"Skipping {full_case_tag} — already completed successfully.")
+                if args.skip_completed and is_experiment_completed(scenario_output_dir, case_name):
+                    ok(f"Skipping {case_name} — already completed successfully.")
+                    scenario_results.append({
+                        "case":    case_name,
+                        "mode":    mode,
+                        "method":  method,
+                        "clients": "N/A",
+                        "success": True,
+                        "elapsed": 0.0,
+                    })
+                    continue
+
+                cmd = build_cmd(
+                    case_name=case_name,
+                    mode=mode,
+                    method=method,
+                    aggregator=agg,
+                    n_clients=20,  # Unused in centralized mode
+                    extra=extra,
+                    output_root=str(scenario_output_dir),
+                    device=device_str,
+                    prepared_dir=str(prepared_dir),
+                    partition_dir=str(partition_dir),
+                    feature_type=args.feature_type,
+                    backbone=backbone,
+                    raw_root=str(raw_dir),
+                    allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+                )
+
+                success, elapsed = run_experiment(case_name, cmd, log_dir, args.dry_run)
+                elapsed_fmt = str(timedelta(seconds=int(elapsed)))
+
+                if success:
+                    ok(f"Finished {case_name} in {elapsed_fmt}")
+                else:
+                    err(f"FAILED {case_name} after {elapsed_fmt} — see {log_dir / f'{case_name}.stdout.log'}")
+                    overall_all_passed = False
+
                 scenario_results.append({
-                    "case":    full_case_tag,
+                    "case":    case_name,
                     "mode":    mode,
                     "method":  method,
-                    "clients": k_clients,
-                    "success": True,
-                    "elapsed": 0.0,
+                    "clients": "N/A",
+                    "success": success,
+                    "elapsed": elapsed,
                 })
-                continue
 
-            cmd = build_cmd(
-                case_name=full_case_tag,
-                mode=mode,
-                method=method,
-                aggregator=agg,
-                n_clients=k_clients,
-                extra=extra,
-                output_root=str(scenario_output_dir),
-                device=device_str,
-                prepared_dir=str(prepared_dir),
-                partition_dir=str(partition_dir),
-                feature_type=args.feature_type,
-                backbone=backbone,
-                raw_root=str(raw_dir),
-                allow_incomplete_benchmark=args.allow_incomplete_benchmark,
-            )
+            print_summary(scenario_title, scenario_results, scenario_output_dir)
+            overall_summary["centralized"] = scenario_results
 
-            success, elapsed = run_experiment(full_case_tag, cmd, log_dir, args.dry_run)
-            elapsed_fmt = str(timedelta(seconds=int(elapsed)))
+    # ──────────────────────────────────────────────────────────────────────────
+    # 2. Federated Paradigm Execution (Iterate over Client Scenarios)
+    # ──────────────────────────────────────────────────────────────────────────
+    if args.mode in ["all", "federated"]:
+        fed_exps = FEDERATED_EXPERIMENTS
+        if args.only:
+            fed_exps = [e for e in fed_exps if args.only.lower() in e[0].lower()]
 
-            if success:
-                ok(f"Finished {full_case_tag} in {elapsed_fmt}")
-            else:
-                err(f"FAILED {full_case_tag} after {elapsed_fmt} — see {log_dir / f'{full_case_tag}.stdout.log'}")
-                overall_all_passed = False
+        if fed_exps:
+            for k_clients in args.clients:
+                scenario_title = f"{k_clients} Clients Federated Scenario ({args.feature_type.upper()})"
+                banner(f"RUNNING FEDERATED SCENARIO: {scenario_title.upper()} ({len(fed_exps)} Cases)")
+                scenario_output_dir = output_root / f"{k_clients}clients"
+                log_dir = scenario_output_dir / "_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                scenario_results = []
 
-            scenario_results.append({
-                "case":    full_case_tag,
-                "mode":    mode,
-                "method":  method,
-                "clients": k_clients,
-                "success": success,
-                "elapsed": elapsed,
-            })
+                for idx, (case_name, mode, method, agg, extra) in enumerate(fed_exps, 1):
+                    full_case_tag = f"{case_name}_K{k_clients}"
+                    section(f"[{idx}/{len(fed_exps)}] {full_case_tag} (K={k_clients})")
+                    info(f"mode={mode}  method={method}  aggregator={agg}  clients={k_clients}")
+                    info(f"rounds/task={FL_ROUNDS}  local_epochs={FL_LOCAL_EPOCHS}")
 
-        print_summary(scenario_title, scenario_results, scenario_output_dir)
-        overall_summary[f"{k_clients}clients"] = scenario_results
+                    if args.skip_completed and is_experiment_completed(scenario_output_dir, full_case_tag):
+                        ok(f"Skipping {full_case_tag} — already completed successfully.")
+                        scenario_results.append({
+                            "case":    full_case_tag,
+                            "mode":    mode,
+                            "method":  method,
+                            "clients": k_clients,
+                            "success": True,
+                            "elapsed": 0.0,
+                        })
+                        continue
+
+                    cmd = build_cmd(
+                        case_name=full_case_tag,
+                        mode=mode,
+                        method=method,
+                        aggregator=agg,
+                        n_clients=k_clients,
+                        extra=extra,
+                        output_root=str(scenario_output_dir),
+                        device=device_str,
+                        prepared_dir=str(prepared_dir),
+                        partition_dir=str(partition_dir),
+                        feature_type=args.feature_type,
+                        backbone=backbone,
+                        raw_root=str(raw_dir),
+                        allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+                    )
+
+                    success, elapsed = run_experiment(full_case_tag, cmd, log_dir, args.dry_run)
+                    elapsed_fmt = str(timedelta(seconds=int(elapsed)))
+
+                    if success:
+                        ok(f"Finished {full_case_tag} in {elapsed_fmt}")
+                    else:
+                        err(f"FAILED {full_case_tag} after {elapsed_fmt} — see {log_dir / f'{full_case_tag}.stdout.log'}")
+                        overall_all_passed = False
+
+                    scenario_results.append({
+                        "case":    full_case_tag,
+                        "mode":    mode,
+                        "method":  method,
+                        "clients": k_clients,
+                        "success": success,
+                        "elapsed": elapsed,
+                    })
+
+                print_summary(scenario_title, scenario_results, scenario_output_dir)
+                overall_summary[f"{k_clients}clients"] = scenario_results
 
     # Save overall summary JSON at root
     with open(output_root / "run_summary.json", "w") as f:
         json.dump(overall_summary, f, indent=2, default=str)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 3. Post-Experiment Academic Report and Summary Graphs Generation
+    # ──────────────────────────────────────────────────────────────────────────
+    banner("POST-EXPERIMENT REPORT & GRAPH GENERATION")
+    try:
+        info("Generating Master Excel Report (report/FCIL_AndMal.xlsx)...")
+        sub_res = subprocess.run([sys.executable, "report/generate_master_report.py"], check=False)
+        if sub_res.returncode == 0:
+            ok("Master Excel Report generated successfully.")
+        else:
+            warn(f"Master Excel generation returned exit code {sub_res.returncode}.")
+
+        info("Generating Academic Summary Figures (report/generate_summary_graphs.py)...")
+        sub_res2 = subprocess.run([sys.executable, "report/generate_summary_graphs.py"], check=False)
+        if sub_res2.returncode == 0:
+            ok("Academic Summary Figures generated successfully.")
+        else:
+            warn(f"Summary figure generation returned exit code {sub_res2.returncode}.")
+    except Exception as ex:
+        warn(f"Could not execute post-experiment report generator: {ex}")
 
     if not overall_all_passed:
         err("Some experiments FAILED. Check per-experiment log files in --output_root.")

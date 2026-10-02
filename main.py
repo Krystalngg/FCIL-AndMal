@@ -239,6 +239,7 @@ def ensure_dataset_ready(
     exp_cfg: ExperimentConfig,
     generate_synthetic: bool = False,
     allow_incomplete_benchmark: bool = False,
+    mode: str = "centralized",
 ) -> None:
     """Ensure raw data, prepared splits, and partitions exist.
 
@@ -293,8 +294,9 @@ def ensure_dataset_ready(
         )
         preparer.run_all(data_type=exp_cfg.scenario.feature_type)
 
-    # Check if Stage 2 partition files exist
-    if not os.path.isfile(partition_table):
+    # Check if Stage 2 partition files exist (only required for federated mode)
+    if mode == "federated":
+        if not os.path.isfile(partition_table):
         print(f"\n[Data Pipeline] Stage 2 partition table not found at {partition_table}. Running partitioner...")
         train_path = os.path.join(prepared_dir, exp_cfg.scenario.feature_type, "train.parquet")
         if os.path.isfile(train_path):
@@ -329,6 +331,7 @@ def main():
         exp_cfg,
         generate_synthetic=args.generate_synthetic,
         allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+        mode=args.mode,
     )
 
     # Load Held-Out Global Test Set
@@ -526,27 +529,30 @@ def main():
 
 
     elif args.mode == "centralized":
-        # Load centralized task data
-        full_train_X, full_train_y = {}, {}
-        scenario_dir = exp_cfg.scenario.get_scenario_dir()
-        
-        for t in range(5):
-            t_task_dfs = []
-            active_cids = get_participating_clients(scenario_dir, t)
-            for cid in active_cids:
-                p_file = os.path.join(scenario_dir, f"task_{t}", f"client_{cid:02d}.parquet")
-                c_file = os.path.join(scenario_dir, f"task_{t}", f"client_{cid:02d}.csv")
-                df_c = pd.read_parquet(p_file) if os.path.isfile(p_file) else pd.read_csv(c_file)
-                t_task_dfs.append(df_c)
+        # Load centralized task data directly from prepared training split
+        train_parquet = os.path.join(exp_cfg.scenario.prepared_data_dir, exp_cfg.scenario.feature_type, "train.parquet")
+        train_csv = os.path.join(exp_cfg.scenario.prepared_data_dir, exp_cfg.scenario.feature_type, "train.csv")
+        if os.path.isfile(train_parquet):
+            train_df = pd.read_parquet(train_parquet)
+        else:
+            train_df = pd.read_csv(train_csv)
 
-            t_df = pd.concat(t_task_dfs, ignore_index=True)
-            f_cols = get_feature_columns(t_df)
-            X_t = t_df[f_cols].to_numpy(dtype=np.float32, copy=False)
+        feature_cols = get_feature_columns(train_df)
+        full_train_X, full_train_y = {}, {}
+
+        for t in range(5):
+            task_classes = TASK_LABEL_MAP[t]
+            t_df = train_df[train_df["label"].isin(task_classes)]
+            if len(t_df) == 0:
+                logger.warning(f"Task {t+1} has 0 samples matching {task_classes} in centralized training set.")
+            X_t = t_df[feature_cols].to_numpy(dtype=np.float32, copy=False)
             y_t = np.array([LABEL2ID.get(lbl, -1) for lbl in t_df["label"].values], dtype=np.int64)
             full_train_X[t] = X_t
             full_train_y[t] = y_t
-            del t_task_dfs, t_df
-            gc.collect()
+            logger.info(f"Centralized Task {t+1}: {len(y_t):,} samples across classes {task_classes}")
+
+        del train_df
+        gc.collect()
 
         trainer = CentralizedTrainer(
             config=exp_cfg,
@@ -558,7 +564,116 @@ def main():
         )
         final_results = trainer.train_all_tasks(epochs_per_task=args.rounds_per_task)
 
+    # Post-training evaluation visualization pipeline
+    generate_post_training_plots(exp_dir, exp_cfg.exp_name, args.mode)
+
     logger.info("Scientific execution pipeline completed cleanly.")
+
+
+def generate_post_training_plots(exp_dir: str, exp_name: str, mode: str) -> None:
+    """Generate academic evaluation plots (learning curves, F1 bar chart, confusion matrix, forgetting matrix)
+    saved into {exp_dir}/plots/.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        plots_dir = os.path.join(exp_dir, "plots")
+        os.makedirs(plots_dir, exist_ok=True)
+
+        jsonl_candidates = [
+            os.path.join(exp_dir, f"{exp_name}.jsonl"),
+            os.path.join(exp_dir, "metrics.jsonl"),
+        ]
+        for f in os.listdir(exp_dir):
+            if f.endswith(".jsonl"):
+                jsonl_candidates.insert(0, os.path.join(exp_dir, f))
+
+        jsonl_path = next((p for p in jsonl_candidates if os.path.isfile(p)), None)
+        if not jsonl_path:
+            return
+
+        records = []
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        pass
+
+        if not records:
+            return
+
+        df_metrics = pd.DataFrame(records)
+
+        # 1. Learning Curves
+        if "accuracy" in df_metrics.columns:
+            fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
+            x_col = "round" if ("round" in df_metrics.columns and mode == "federated") else ("epoch" if "epoch" in df_metrics.columns else "task_id")
+            if x_col in df_metrics.columns:
+                ax.plot(df_metrics[x_col], df_metrics["accuracy"] * 100, marker="o", label="Accuracy (%)", color="#1f77b4")
+                if "f1_macro" in df_metrics.columns:
+                    ax.plot(df_metrics[x_col], df_metrics["f1_macro"] * 100, marker="s", label="Macro-F1 (%)", color="#ff7f0e")
+                ax.set_xlabel(x_col.capitalize())
+                ax.set_ylabel("Metric (%)")
+                ax.set_title(f"Evaluation Trajectory: {exp_name}")
+                ax.legend()
+                ax.grid(True, linestyle="--", alpha=0.5)
+                fig.savefig(os.path.join(plots_dir, "learning_curves.png"), bbox_inches="tight", dpi=300)
+                fig.savefig(os.path.join(plots_dir, "learning_curves.pdf"), bbox_inches="tight")
+                plt.close(fig)
+
+        # 2. Final Confusion Matrix Heatmap
+        cm_records = [r for r in records if "confusion_matrix" in r]
+        if cm_records:
+            last_cm = np.array(cm_records[-1]["confusion_matrix"])
+            fig, ax = plt.subplots(figsize=(10, 8), dpi=300)
+            sns.heatmap(last_cm, annot=True, fmt="d", cmap="Blues", ax=ax)
+            ax.set_title(f"Final Task Confusion Matrix: {exp_name}")
+            ax.set_xlabel("Predicted Label ID")
+            ax.set_ylabel("True Label ID")
+            fig.savefig(os.path.join(plots_dir, "final_confusion_matrix.png"), bbox_inches="tight", dpi=300)
+            fig.savefig(os.path.join(plots_dir, "final_confusion_matrix.pdf"), bbox_inches="tight")
+            plt.close(fig)
+
+        # 3. Per-Family F1 Score Bar Chart
+        if "per_class_f1" in records[-1]:
+            per_f1 = records[-1]["per_class_f1"]
+            if isinstance(per_f1, dict):
+                classes = list(per_f1.keys())
+                vals = [per_f1[c] * 100 for c in classes]
+                fig, ax = plt.subplots(figsize=(10, 5), dpi=300)
+                ax.bar(classes, vals, color="#2ca02c", edgecolor="black", alpha=0.85)
+                ax.set_ylabel("F1 Score (%)")
+                ax.set_title(f"Final Per-Family F1 Score: {exp_name}")
+                ax.set_xticklabels(classes, rotation=45, ha="right")
+                ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+                fig.savefig(os.path.join(plots_dir, "per_family_f1.png"), bbox_inches="tight", dpi=300)
+                fig.savefig(os.path.join(plots_dir, "per_family_f1.pdf"), bbox_inches="tight")
+                plt.close(fig)
+
+        # 4. Forgetting Matrix Heatmap
+        continual_records = [r for r in records if "continual_matrix" in r or "task_matrix" in r]
+        if continual_records:
+            mat_key = "continual_matrix" if "continual_matrix" in continual_records[-1] else "task_matrix"
+            raw_mat = continual_records[-1][mat_key]
+            if isinstance(raw_mat, (list, np.ndarray)):
+                mat = np.array(raw_mat)
+                fig, ax = plt.subplots(figsize=(6, 5), dpi=300)
+                sns.heatmap(mat, annot=True, fmt=".2f", cmap="YlGnBu", ax=ax)
+                ax.set_title(f"Task Evaluation Matrix {{t,\tau}}$: {exp_name}")
+                ax.set_xlabel("Evaluated Task $\tau$")
+                ax.set_ylabel("Current Task $")
+                fig.savefig(os.path.join(plots_dir, "forgetting_matrix.png"), bbox_inches="tight", dpi=300)
+                fig.savefig(os.path.join(plots_dir, "forgetting_matrix.pdf"), bbox_inches="tight")
+                plt.close(fig)
+
+    except Exception as e:
+        print(f"[Warning] Failed to generate post-training plots: {e}")
 
 
 if __name__ == "__main__":

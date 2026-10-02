@@ -46,8 +46,9 @@ paper/
 Dataset/
 checkpoints/
 result 3_9.txt
-#report/
+report/
 FCIL-AndMal-Result/
+Paper/
 
 
 # Miscellaneous
@@ -55,3 +56,4 @@ FCIL-AndMal-Result/
 .agents/
 .claude/
 .DS_Store
+report/FCIL_AndMal.xlsx
