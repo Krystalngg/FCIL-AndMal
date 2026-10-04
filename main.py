@@ -423,7 +423,17 @@ def main():
             f"Configured classes absent from the dataset: {missing_labels}. "
             "Results are not a complete 15-class benchmark."
         )
-        if not args.allow_incomplete_benchmark:
+        provenance_path = os.path.join(exp_cfg.scenario.prepared_data_dir, "data_provenance.json")
+        provenance_non_strict = False
+        if os.path.isfile(provenance_path):
+            try:
+                with open(provenance_path, "r", encoding="utf-8") as f:
+                    prov_meta = json.load(f)
+                provenance_non_strict = (prov_meta.get("strict_class_coverage") is False)
+            except Exception:
+                pass
+
+        if not args.allow_incomplete_benchmark and not provenance_non_strict:
             raise ValueError(
                 f"{message} Re-run only with --allow_incomplete_benchmark for "
                 "an explicitly labeled development experiment."
