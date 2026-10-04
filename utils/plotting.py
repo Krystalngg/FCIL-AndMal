@@ -1,7 +1,8 @@
 """
 Academic Plotting and Visualization Suite.
-Generates publication-quality figures: Partition Heatmaps, Incremental Learning Curves,
-Catastrophic Forgetting Matrices, and Per-Family Performance Breakdowns.
+Generates publication-quality figures using matplotlib and scikit-learn:
+Partition Heatmaps, Incremental Learning Curves, Catastrophic Forgetting Matrices,
+and Per-Family Performance Breakdowns.
 """
 
 import os
@@ -10,7 +11,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend
 import matplotlib.pyplot as plt
-import seaborn as sns
+from sklearn.metrics import ConfusionMatrixDisplay
 
 
 def plot_partition_heatmap(
@@ -27,7 +28,7 @@ def plot_partition_heatmap(
     with distinct visual vertical separators demarcating task boundaries.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.figure(figsize=(14, 8), dpi=300)
+    fig, ax = plt.subplots(figsize=(14, 8), dpi=300)
 
     data_to_plot = np.copy(partition_matrix)
     if log_scale:
@@ -36,28 +37,24 @@ def plot_partition_heatmap(
     else:
         cbar_label = "Sample Count"
 
-    cmap = sns.color_palette("mako", as_cmap=True)
-    ax = sns.heatmap(
-        data_to_plot,
-        cmap=cmap,
-        annot=False,
-        cbar_kws={"label": cbar_label},
-        xticklabels=class_names,
-        yticklabels=[f"Client {cid:02d}" for cid in client_ids],
-    )
+    im = ax.imshow(data_to_plot, cmap="viridis", aspect="auto", interpolation="nearest")
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(cbar_label, fontsize=11)
 
     # Draw vertical task boundary lines
     for boundary in task_boundaries:
-        ax.axvline(boundary, color="crimson", linestyle="--", linewidth=2.0, alpha=0.85)
+        ax.axvline(boundary - 0.5, color="crimson", linestyle="--", linewidth=2.0, alpha=0.85)
 
-    plt.title(title, fontsize=14, fontweight="bold", pad=15)
-    plt.xlabel("Class / Family (Sequential Tasks demarcated by dashed lines)", fontsize=12, labelpad=10)
-    plt.ylabel("Federated Clients", fontsize=12, labelpad=10)
-    plt.xticks(rotation=45, ha="right", fontsize=10)
-    plt.yticks(fontsize=8)
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=15)
+    ax.set_xlabel("Class / Family (Sequential Tasks demarcated by dashed lines)", fontsize=12, labelpad=10)
+    ax.set_ylabel("Federated Clients", fontsize=12, labelpad=10)
+    ax.set_xticks(range(len(class_names)))
+    ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=10)
+    ax.set_yticks(range(len(client_ids)))
+    ax.set_yticklabels([f"Client {cid:02d}" for cid in client_ids], fontsize=8)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300)
-    plt.close()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_fcil_learning_curves(
@@ -66,7 +63,7 @@ def plot_fcil_learning_curves(
     exp_name: str = "FCIL"
 ) -> None:
     """
-    Plot Macro-F1, Accuracy, and Average Forgetting across incremental tasks.
+    Plot Macro-F1, Accuracy, and Average Forgetting across incremental tasks using matplotlib.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     tasks = [res["task_id"] + 1 for res in task_results]
@@ -75,22 +72,23 @@ def plot_fcil_learning_curves(
     forgettings = [res.get("average_forgetting", 0.0) * 100 for res in task_results]
     malware_f1s = [res.get("f1_malware_avg", 0.0) * 100 for res in task_results]
 
-    plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(tasks, macro_f1s, marker="o", linewidth=2.5, color="#1f77b4", label="Macro-F1 (%)")
-    plt.plot(tasks, accuracies, marker="s", linewidth=2.0, color="#2ca02c", linestyle="--", label="Overall Accuracy (%)")
-    plt.plot(tasks, malware_f1s, marker="^", linewidth=2.0, color="#ff7f0e", linestyle="-.", label="Malware Families F1 (%)")
-    plt.plot(tasks, forgettings, marker="x", linewidth=2.0, color="#d62728", linestyle=":", label="Catastrophic Forgetting (%)")
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
+    ax.plot(tasks, macro_f1s, marker="o", linewidth=2.5, color="#1f77b4", label="Macro-F1 (%)")
+    ax.plot(tasks, accuracies, marker="s", linewidth=2.0, color="#2ca02c", linestyle="--", label="Overall Accuracy (%)")
+    ax.plot(tasks, malware_f1s, marker="^", linewidth=2.0, color="#ff7f0e", linestyle="-.", label="Malware Families F1 (%)")
+    ax.plot(tasks, forgettings, marker="x", linewidth=2.0, color="#d62728", linestyle=":", label="Catastrophic Forgetting (%)")
 
-    plt.title(f"Class-Incremental Evaluation Across 5 Tasks ({exp_name})", fontsize=13, fontweight="bold")
-    plt.xlabel("Task ID (1 to 5)", fontsize=11)
-    plt.ylabel("Performance Metric (%)", fontsize=11)
-    plt.xticks(tasks, [f"Task {t}" for t in tasks])
-    plt.ylim(0, 105)
-    plt.grid(True, linestyle="--", alpha=0.5)
-    plt.legend(loc="lower left", frameon=True, shadow=True)
+    ax.set_title(f"Class-Incremental Evaluation Across 5 Tasks ({exp_name})", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Task ID (1 to 5)", fontsize=11)
+    ax.set_ylabel("Performance Metric (%)", fontsize=11)
+    ax.set_xticks(tasks)
+    ax.set_xticklabels([f"Task {t}" for t in tasks])
+    ax.set_ylim(0, 105)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="lower left", frameon=True, shadow=True)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300)
-    plt.close()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_forgetting_matrix(
@@ -99,28 +97,32 @@ def plot_forgetting_matrix(
     title: str = "Catastrophic Forgetting Evaluation Matrix ($R_{i,j}$)"
 ) -> None:
     """
-    Plot heat matrix of test performance on Task j after completing Task i.
+    Plot heat matrix of test performance on Task j after completing Task i using matplotlib.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.figure(figsize=(8, 6), dpi=300)
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
 
-    mask = np.isnan(R_matrix)
-    ax = sns.heatmap(
-        R_matrix * 100,
-        annot=True,
-        fmt=".1f",
-        cmap="Blues",
-        mask=mask,
-        cbar_kws={"label": "Accuracy (%)"},
-        xticklabels=[f"Task {j+1}" for j in range(R_matrix.shape[1])],
-        yticklabels=[f"After T{i+1}" for i in range(R_matrix.shape[0])],
-    )
-    plt.title(title, fontsize=12, fontweight="bold", pad=12)
-    plt.xlabel("Evaluated Task", fontsize=11)
-    plt.ylabel("Completed Incremental Step", fontsize=11)
+    im = ax.imshow(R_matrix * 100, cmap="Blues", aspect="auto", vmin=0, vmax=100)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Accuracy (%)", fontsize=11)
+
+    for i in range(R_matrix.shape[0]):
+        for j in range(R_matrix.shape[1]):
+            val = R_matrix[i, j]
+            if not np.isnan(val):
+                text_color = "white" if val * 100 > 50 else "black"
+                ax.text(j, i, f"{val * 100:.1f}", ha="center", va="center", color=text_color, fontsize=10)
+
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
+    ax.set_xlabel("Evaluated Task", fontsize=11)
+    ax.set_ylabel("Completed Incremental Step", fontsize=11)
+    ax.set_xticks(range(R_matrix.shape[1]))
+    ax.set_xticklabels([f"Task {j+1}" for j in range(R_matrix.shape[1])])
+    ax.set_yticks(range(R_matrix.shape[0]))
+    ax.set_yticklabels([f"After T{i+1}" for i in range(R_matrix.shape[0])])
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300)
-    plt.close()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_per_family_f1_bar(
@@ -136,21 +138,22 @@ def plot_per_family_f1_bar(
     scores = [per_class_f1[k] * 100 for k in labels]
     colors = ["#2ca02c" if l == "Benign" else "#1f77b4" for l in labels]
 
-    plt.figure(figsize=(12, 6), dpi=300)
-    bars = plt.bar(range(len(labels)), scores, color=colors, edgecolor="black", alpha=0.85)
-    plt.xticks(range(len(labels)), labels, rotation=45, ha="right", fontsize=10)
-    plt.ylabel("F1 Score (%)", fontsize=11)
-    plt.ylim(0, 105)
-    plt.title(title, fontsize=13, fontweight="bold", pad=12)
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=300)
+    bars = ax.bar(range(len(labels)), scores, color=colors, edgecolor="black", alpha=0.85)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=10)
+    ax.set_ylabel("F1 Score (%)", fontsize=11)
+    ax.set_ylim(0, 105)
+    ax.set_title(title, fontsize=13, fontweight="bold", pad=12)
 
     for bar, score in zip(bars, scores):
         yval = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width() / 2.0, yval + 1.5, f"{score:.1f}%", ha="center", va="bottom", fontsize=8)
+        ax.text(bar.get_x() + bar.get_width() / 2.0, yval + 1.5, f"{score:.1f}%", ha="center", va="bottom", fontsize=8)
 
-    plt.grid(axis="y", linestyle="--", alpha=0.5)
+    ax.grid(axis="y", linestyle="--", alpha=0.5)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300)
-    plt.close()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_confusion_matrix(
@@ -159,7 +162,7 @@ def plot_confusion_matrix(
     output_path: str,
     title: str = "Confusion Matrix"
 ) -> None:
-    """Save a confusion matrix using the class order used during evaluation."""
+    """Save a confusion matrix using scikit-learn ConfusionMatrixDisplay and matplotlib."""
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -169,21 +172,12 @@ def plot_confusion_matrix(
         raise ValueError("Confusion matrix dimensions must match class_names")
 
     figure_size = max(6, min(14, len(class_names)))
-    plt.figure(figsize=(figure_size, figure_size), dpi=200)
-    sns.heatmap(
-        matrix_array,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        cbar_kws={"label": "Samples"},
-        xticklabels=class_names,
-        yticklabels=class_names,
-    )
-    plt.title(title)
-    plt.xlabel("Predicted label")
-    plt.ylabel("True label")
-    plt.xticks(rotation=45, ha="right")
-    plt.yticks(rotation=0)
+    fig, ax = plt.subplots(figsize=(figure_size, figure_size), dpi=200)
+    disp = ConfusionMatrixDisplay(confusion_matrix=matrix_array, display_labels=class_names)
+    disp.plot(cmap=plt.cm.Blues, ax=ax, xticks_rotation=45, values_format="d", colorbar=True)
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
+    ax.set_xlabel("Predicted label", fontsize=11)
+    ax.set_ylabel("True label", fontsize=11)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=200)
-    plt.close()
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)

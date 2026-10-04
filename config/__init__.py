@@ -6,6 +6,7 @@ from .config import (
     FLConfig,
     IncrementalConfig,
     ILConfig,
+    DriftConfig,
     ExperimentConfig,
     task_config,
     STATIC_LABEL_MAP,
@@ -59,6 +60,7 @@ __all__ = [
     'FLConfig',
     'IncrementalConfig',
     'ILConfig',
+    'DriftConfig',
     'ExperimentConfig',
     # Config data
     'task_config',

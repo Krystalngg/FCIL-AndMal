@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from federated.client import FLClient
 from federated.aggregators.base import BaseAggregator, FedAvg
+from federated.drift.controller import ServerDriftController
 from config import ID2LABEL
 from utils.device import resolve_device
 from utils.metrics import format_classification_metrics, format_confusion_matrix
@@ -34,6 +35,8 @@ class FLServer:
         evaluator: Optional[Any] = None,
         logger: Optional[Any] = None,
         checkpoint_manager: Optional[Any] = None,
+        drift_controller: Optional[ServerDriftController] = None,
+        enable_drift_filtering: bool = False,
     ):
         if global_model is None and config is not None:
             from models.fcil_model import FCILNet
@@ -46,6 +49,41 @@ class FLServer:
         self.aggregator = aggregator or FedAvg()
         self.device = resolve_device(device)
 
+        # FL-MalDrift Server-Side Controller & Gating
+        self.enable_drift_filtering = enable_drift_filtering
+        self.drift_controller = drift_controller
+
+        if not self.enable_drift_filtering and config is not None:
+            if getattr(config, 'enable_drift', False):
+                self.enable_drift_filtering = True
+            elif hasattr(config, 'fl') and getattr(config.fl, 'enable_drift', False):
+                self.enable_drift_filtering = True
+            elif hasattr(config, 'drift') and getattr(config.drift, 'enabled', False):
+                self.enable_drift_filtering = True
+
+        if self.enable_drift_filtering and self.drift_controller is None:
+            warmup = 3
+            window_size = 10
+            alpha = 0.8
+            k = 1.5
+            p_star = 0.7
+            eta = 0.05
+            drift_cfg = getattr(config, 'drift', None) if config else None
+            if drift_cfg is not None:
+                warmup = getattr(drift_cfg, 'warmup_rounds', warmup)
+                window_size = getattr(drift_cfg, 'window_size', window_size)
+                alpha = getattr(drift_cfg, 'alpha', alpha)
+                k = getattr(drift_cfg, 'k', k)
+                p_star = getattr(drift_cfg, 'p_star', p_star)
+                eta = getattr(drift_cfg, 'eta', eta)
+            self.drift_controller = ServerDriftController(
+                warmup_rounds=warmup,
+                window_size=window_size,
+                alpha=alpha,
+                k=k,
+                target_participation_budget=p_star,
+                gain_eta=eta,
+            )
 
         # Clients
         self.clients: Dict[int, FLClient] = {}
@@ -172,7 +210,7 @@ class FLServer:
         n_epochs: int,
         **kwargs
     ) -> Dict[str, Any]:
-        """Run one federated learning round.
+        """Run one federated learning round with optional FL-MalDrift gating.
 
         Args:
             client_ids: List of participating client IDs.
@@ -188,8 +226,9 @@ class FLServer:
 
         # Local training
         client_metrics = []
-        client_weights = []
-        client_steps = []
+        client_weights_map: Dict[int, float] = {}
+        client_steps_map: Dict[int, int] = {}
+        client_scores: Dict[int, float] = {}
 
         for cid in client_ids:
             if cid in train_loaders:
@@ -199,21 +238,66 @@ class FLServer:
                     **kwargs
                 )
                 client_metrics.append(metrics)
-                client_weights.append(metrics.get('n_samples', 1))
-                client_steps.append(metrics.get('n_steps', 1))
+                client_weights_map[cid] = metrics.get('n_samples', 1)
+                client_steps_map[cid] = metrics.get('n_steps', 1)
+                client_scores[cid] = float(metrics.get('drift_score', 0.0))
 
-        # Aggregate models
-        self.aggregate_models(client_ids, client_weights, client_steps)
+        # FL-MalDrift Admission Filtering (Algorithm 2)
+        admitted_client_ids = [cid for cid in client_ids if cid in train_loaders]
+        drift_round_info = {}
+        if self.enable_drift_filtering and self.drift_controller is not None:
+            current_round_idx = len(self.history) + 1
+            admitted_client_ids, tau_t, drift_round_info = self.drift_controller.step(
+                round_idx=current_round_idx,
+                client_scores=client_scores,
+            )
+            # Ensure admitted_client_ids only includes clients that actually trained
+            admitted_client_ids = [cid for cid in admitted_client_ids if cid in client_weights_map]
 
-        # Aggregate prototypes (for MALFSIL)
-        self.aggregate_prototypes(client_ids)
+            # Paper (Patel et al. 2026, Sec. 4.4): During warm-up, record each client's
+            # post-training divergence so theta_base can be calibrated to the per-client
+            # median divergence.  Once warm-up ends, finalize theta_base for each client.
+            is_warmup = drift_round_info.get('warmup_active', False)
+            for cid in client_ids:
+                if cid in self.clients and cid in train_loaders:
+                    client = self.clients[cid]
+                    if is_warmup:
+                        client.record_warmup_divergence()
+                    else:
+                        client.calibrate_theta_base()
+
+        # Extract weights and step counts for admitted clients
+        admitted_weights = [client_weights_map[cid] for cid in admitted_client_ids]
+        admitted_steps = [client_steps_map[cid] for cid in admitted_client_ids]
+
+        # Aggregate models from admitted stable clients
+        if admitted_client_ids:
+            self.aggregate_models(admitted_client_ids, admitted_weights, admitted_steps)
+            # Aggregate prototypes (for MALFSIL) from admitted clients
+            self.aggregate_prototypes(admitted_client_ids)
+
+        # Client Rollback: Quarantined/excluded clients have their local parameters
+        # rolled back to the newly aggregated global model to prevent drift contamination
+        if self.enable_drift_filtering and self.drift_controller is not None:
+            excluded_cids = [cid for cid in client_ids if cid in train_loaders and cid not in admitted_client_ids]
+            if excluded_cids:
+                global_state = self.global_model.state_dict()
+                for cid in excluded_cids:
+                    if cid in self.clients:
+                        self.clients[cid].set_model_state(global_state)
 
         # Return metrics
-        return {
+        round_metrics = {
             'round': len(self.history),
             'n_clients': len(client_ids),
-            'client_metrics': client_metrics
+            'n_admitted': len(admitted_client_ids),
+            'admitted_clients': admitted_client_ids,
+            'client_metrics': client_metrics,
         }
+        if drift_round_info:
+            round_metrics['drift_control'] = drift_round_info
+
+        return round_metrics
 
     def run_task(
         self,
@@ -293,6 +377,31 @@ class FLServer:
                 )
                 metrics["checkpoint_path"] = checkpoint_path
                 round_checkpoint_paths.append(checkpoint_path)
+
+            if (round_idx + 1) % 10 == 0:
+                is_final_round = (round_idx == n_rounds - 1)
+                if not is_final_round and self.evaluator is not None:
+                    interim_eval = self.evaluator.evaluate_all_seen_tasks(
+                        self.global_model, task_id
+                    )
+                    metrics.update(interim_eval)
+                    context = (
+                        f"FL Task {task_id + 1} | Global Round {global_round} "
+                        f"(task round {local_round}/{n_rounds}) | Interim Test"
+                    )
+                    if self.logger is not None and hasattr(self.logger, "log_evaluation"):
+                        self.logger.log_evaluation(
+                            interim_eval,
+                            context=context,
+                            task_id=task_id,
+                            step=global_round,
+                            round_id=global_round,
+                            include_confusion_matrix=False,
+                            label_names=ID2LABEL,
+                        )
+                    else:
+                        print(f"{context} | {format_classification_metrics(interim_eval)}")
+
             round_metrics.append(metrics)
 
             if (round_idx + 1) % 10 == 0 or round_idx == 0:

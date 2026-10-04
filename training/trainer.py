@@ -223,6 +223,7 @@ class CentralizedTrainer:
                     interim_metrics = self.validation_evaluator.evaluate_all_seen_tasks(
                         self.model, task_id
                     )
+                    global_epoch = task_id * epochs_per_task + (ep + 1)
                     context = (
                         f"Centralized Task {task_id + 1} | "
                         f"Epoch {ep + 1}/{epochs_per_task} | Validation"
@@ -232,8 +233,16 @@ class CentralizedTrainer:
                         interim_metrics,
                         context=context,
                         task_id=task_id,
-                        step=ep + 1,
+                        step=global_epoch,
                     )
+                    if (ep + 1) % 50 == 0 and self.checkpoint_mgr is not None:
+                        self.checkpoint_mgr.save_weights_checkpoint(
+                            self.model,
+                            task_id=task_id,
+                            step_type="epoch",
+                            step_id=ep + 1,
+                            global_step=global_epoch,
+                        )
                     self.model.train()
                 elif is_final_epoch:
                     # Log final epoch loss; full evaluation with confusion matrix
@@ -272,7 +281,7 @@ class CentralizedTrainer:
                     f"Epoch {epochs_per_task}/{epochs_per_task} | Final Test"
                 ),
                 task_id=task_id,
-                step=epochs_per_task,
+                step=(task_id + 1) * epochs_per_task,
                 include_confusion_matrix=True,
                 label_names=ID2LABEL,
             )

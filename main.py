@@ -29,6 +29,7 @@ from config import (
     ModelConfig,
     ILConfig,
     FLConfig,
+    DriftConfig,
     TASK_LABEL_MAP,
     ALL_LABELS,
     LABEL2ID,
@@ -132,6 +133,51 @@ def parse_args():
     parser.add_argument("--resume_checkpoint", type=str, default=None,
                         help="Path to checkpoint file (.pt) to resume training from")
 
+    # FL-MalDrift Drift Detection & Admission Control
+    # (Patel et al. 2026 — Algorithm 1 & 2)
+    drift_grp = parser.add_argument_group("FL-MalDrift drift control (Patel et al. 2026)")
+    drift_grp.add_argument(
+        "--enable_drift", action="store_true", default=False,
+        help="Activate FL-MalDrift drift detection, admission filtering, and recovery (Algorithm 1 & 2)"
+    )
+    drift_grp.add_argument(
+        "--drift_detector", type=str, default="hddm_w",
+        choices=["hddm_w", "hddm_a", "adwin", "ddm", "eddm"],
+        help="Drift detector algorithm used client-side (Algorithm 1)"
+    )
+    drift_grp.add_argument(
+        "--drift_k", type=float, default=1.5,
+        help="σ multiplier k for dynamic server threshold τ_t (Algorithm 2)"
+    )
+    drift_grp.add_argument(
+        "--drift_alpha", type=float, default=0.8,
+        help="EWMA smoothing factor α for server threshold τ_t (Algorithm 2)"
+    )
+    drift_grp.add_argument(
+        "--drift_p_star", type=float, default=0.7,
+        help="Target admission rate p* for server admission control (Algorithm 2)"
+    )
+    drift_grp.add_argument(
+        "--drift_warmup", type=int, default=3,
+        help="Warm-up rounds T₀ before drift filtering activates (Algorithm 2)"
+    )
+    drift_grp.add_argument(
+        "--drift_theta_base", type=float, default=0.1,
+        help="Floor θ_base for client local stability threshold (Algorithm 1)"
+    )
+    drift_grp.add_argument(
+        "--drift_beta", type=float, default=0.9,
+        help="EWMA β for client local threshold update (Algorithm 1)"
+    )
+    drift_grp.add_argument(
+        "--drift_eta", type=float, default=0.05,
+        help="Admission-rate correction gain η for server threshold (Algorithm 2)"
+    )
+    drift_grp.add_argument(
+        "--drift_window", type=int, default=10,
+        help="Sliding window size W for server μ/σ estimation (Algorithm 2)"
+    )
+
     return parser.parse_args()
 
 
@@ -205,6 +251,22 @@ def build_configs_from_args(args) -> ExperimentConfig:
         device=str(resolved_dev),
     )
 
+    # --- FL-MalDrift drift config (additive; None when drift is disabled) ---
+    drift_cfg: Optional[DriftConfig] = None
+    if getattr(args, 'enable_drift', False):
+        drift_cfg = DriftConfig(
+            enabled=True,
+            detector_type=getattr(args, 'drift_detector', 'hddm_w'),
+            window_size=getattr(args, 'drift_window', 10),
+            warmup_rounds=getattr(args, 'drift_warmup', 3),
+            alpha=getattr(args, 'drift_alpha', 0.8),
+            k=getattr(args, 'drift_k', 1.5),
+            p_star=getattr(args, 'drift_p_star', 0.7),
+            eta=getattr(args, 'drift_eta', 0.05),
+            beta=getattr(args, 'drift_beta', 0.9),
+            theta_base=getattr(args, 'drift_theta_base', 0.1),
+        )
+
     if args.mode == "federated":
         case_name = (
             f"{args.exp_name}_FEDERATED_{args.feature_type.upper()}_"
@@ -230,6 +292,7 @@ def build_configs_from_args(args) -> ExperimentConfig:
         model=model_cfg,
         il=il_cfg,
         fl=fl_cfg,
+        drift=drift_cfg,
         seed=args.seed
     )
     return exp_cfg
@@ -297,15 +360,15 @@ def ensure_dataset_ready(
     # Check if Stage 2 partition files exist (only required for federated mode)
     if mode == "federated":
         if not os.path.isfile(partition_table):
-        print(f"\n[Data Pipeline] Stage 2 partition table not found at {partition_table}. Running partitioner...")
-        train_path = os.path.join(prepared_dir, exp_cfg.scenario.feature_type, "train.parquet")
-        if os.path.isfile(train_path):
-            df = pd.read_parquet(train_path)
-        else:
-            df = pd.read_csv(os.path.join(prepared_dir, exp_cfg.scenario.feature_type, "train.csv"))
-        
-        partitioner = FCILDataPartitioner(exp_cfg.scenario)
-        partitioner.partition_dataframe(df)
+            print(f"\n[Data Pipeline] Stage 2 partition table not found at {partition_table}. Running partitioner...")
+            train_path = os.path.join(prepared_dir, exp_cfg.scenario.feature_type, "train.parquet")
+            if os.path.isfile(train_path):
+                df = pd.read_parquet(train_path)
+            else:
+                df = pd.read_csv(os.path.join(prepared_dir, exp_cfg.scenario.feature_type, "train.csv"))
+
+            partitioner = FCILDataPartitioner(exp_cfg.scenario)
+            partitioner.partition_dataframe(df)
 
 
 def main():
@@ -425,6 +488,7 @@ def main():
             evaluator=evaluator,
             logger=logger,
             checkpoint_manager=ckpt_mgr,
+            enable_drift_filtering=(exp_cfg.drift is not None and exp_cfg.drift.enabled),
         )
 
         scenario_dir = exp_cfg.scenario.get_scenario_dir()
@@ -445,11 +509,20 @@ def main():
                 device=resolved_device,
                 classes_per_task=exp_cfg.model.classes_per_task,
             )
+            # --- FL-MalDrift: per-client drift detector & normalizer (Algorithm 1) ---
+            _drift_detector = None
+            _drift_normalizer = None
+            if exp_cfg.drift is not None and exp_cfg.drift.enabled:
+                from federated.drift import build_drift_detector, DriftScoreNormalizer
+                _drift_detector = build_drift_detector(exp_cfg.drift.detector_type)
+                _drift_normalizer = DriftScoreNormalizer()
             client = FLClient(
                 client_id=client_id,
                 model=client_model,
                 strategy=adapter,
                 device=resolved_device,
+                drift_detector=_drift_detector,
+                drift_normalizer=_drift_normalizer,
             )
             server.register_client(client)
 
@@ -578,7 +651,6 @@ def generate_post_training_plots(exp_dir: str, exp_name: str, mode: str) -> None
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        import seaborn as sns
 
         plots_dir = os.path.join(exp_dir, "plots")
         os.makedirs(plots_dir, exist_ok=True)
@@ -608,34 +680,65 @@ def generate_post_training_plots(exp_dir: str, exp_name: str, mode: str) -> None
         if not records:
             return
 
-        df_metrics = pd.DataFrame(records)
+        flattened_records = []
+        for r in records:
+            if not isinstance(r, dict):
+                continue
+            row = dict(r)
+            if "metrics" in row and isinstance(row["metrics"], dict):
+                row.update(row["metrics"])
+            flattened_records.append(row)
+
+        if not flattened_records:
+            return
+
+        df_metrics = pd.DataFrame(flattened_records)
 
         # 1. Learning Curves
         if "accuracy" in df_metrics.columns:
             fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
-            x_col = "round" if ("round" in df_metrics.columns and mode == "federated") else ("epoch" if "epoch" in df_metrics.columns else "task_id")
-            if x_col in df_metrics.columns:
-                ax.plot(df_metrics[x_col], df_metrics["accuracy"] * 100, marker="o", label="Accuracy (%)", color="#1f77b4")
-                if "f1_macro" in df_metrics.columns:
-                    ax.plot(df_metrics[x_col], df_metrics["f1_macro"] * 100, marker="s", label="Macro-F1 (%)", color="#ff7f0e")
-                ax.set_xlabel(x_col.capitalize())
-                ax.set_ylabel("Metric (%)")
-                ax.set_title(f"Evaluation Trajectory: {exp_name}")
-                ax.legend()
-                ax.grid(True, linestyle="--", alpha=0.5)
-                fig.savefig(os.path.join(plots_dir, "learning_curves.png"), bbox_inches="tight", dpi=300)
-                fig.savefig(os.path.join(plots_dir, "learning_curves.pdf"), bbox_inches="tight")
-                plt.close(fig)
+            if "step" in df_metrics.columns and df_metrics["step"].notna().any():
+                x_col = "step"
+                x_label = "Communication Round" if mode == "federated" else "Epoch"
+            elif "round" in df_metrics.columns and mode == "federated":
+                x_col = "round"
+                x_label = "Round"
+            elif "round_id" in df_metrics.columns and mode == "federated":
+                x_col = "round_id"
+                x_label = "Round"
+            elif "epoch" in df_metrics.columns:
+                x_col = "epoch"
+                x_label = "Epoch"
+            else:
+                x_col = "task_id"
+                x_label = "Task ID"
+
+            ax.plot(df_metrics[x_col], df_metrics["accuracy"] * 100, marker="o", label="Accuracy (%)", color="#1f77b4")
+            f1_col = "f1_macro" if "f1_macro" in df_metrics.columns else ("macro_f1" if "macro_f1" in df_metrics.columns else None)
+            if f1_col:
+                ax.plot(df_metrics[x_col], df_metrics[f1_col] * 100, marker="s", label="Macro-F1 (%)", color="#ff7f0e")
+            ax.set_xlabel(x_label)
+            ax.set_ylabel("Metric (%)")
+            ax.set_title(f"Evaluation Trajectory: {exp_name}")
+            ax.legend()
+            ax.grid(True, linestyle="--", alpha=0.5)
+            fig.savefig(os.path.join(plots_dir, "learning_curves.png"), bbox_inches="tight", dpi=300)
+            fig.savefig(os.path.join(plots_dir, "learning_curves.pdf"), bbox_inches="tight")
+            plt.close(fig)
 
         # 2. Final Confusion Matrix Heatmap
         cm_records = [r for r in records if "confusion_matrix" in r]
         if cm_records:
-            last_cm = np.array(cm_records[-1]["confusion_matrix"])
+            from sklearn.metrics import ConfusionMatrixDisplay
+            last_record = cm_records[-1]
+            last_cm = np.array(last_record["confusion_matrix"])
+            labels = last_record.get("confusion_matrix_labels", list(range(len(last_cm))))
+            display_labels = [ID2LABEL.get(int(lbl), str(lbl)) for lbl in labels]
+
             fig, ax = plt.subplots(figsize=(10, 8), dpi=300)
-            sns.heatmap(last_cm, annot=True, fmt="d", cmap="Blues", ax=ax)
-            ax.set_title(f"Final Task Confusion Matrix: {exp_name}")
-            ax.set_xlabel("Predicted Label ID")
-            ax.set_ylabel("True Label ID")
+            disp = ConfusionMatrixDisplay(confusion_matrix=last_cm, display_labels=display_labels)
+            disp.plot(cmap=plt.cm.Blues, ax=ax, xticks_rotation=45, values_format="d", colorbar=True)
+            ax.set_title(f"Final Task Confusion Matrix: {exp_name}", fontsize=12, fontweight="bold", pad=12)
             fig.savefig(os.path.join(plots_dir, "final_confusion_matrix.png"), bbox_inches="tight", dpi=300)
             fig.savefig(os.path.join(plots_dir, "final_confusion_matrix.pdf"), bbox_inches="tight")
             plt.close(fig)
@@ -648,9 +751,10 @@ def generate_post_training_plots(exp_dir: str, exp_name: str, mode: str) -> None
                 vals = [per_f1[c] * 100 for c in classes]
                 fig, ax = plt.subplots(figsize=(10, 5), dpi=300)
                 ax.bar(classes, vals, color="#2ca02c", edgecolor="black", alpha=0.85)
-                ax.set_ylabel("F1 Score (%)")
-                ax.set_title(f"Final Per-Family F1 Score: {exp_name}")
-                ax.set_xticklabels(classes, rotation=45, ha="right")
+                ax.set_ylabel("F1 Score (%)", fontsize=11)
+                ax.set_title(f"Final Per-Family F1 Score: {exp_name}", fontsize=12, fontweight="bold", pad=12)
+                ax.set_xticks(range(len(classes)))
+                ax.set_xticklabels(classes, rotation=45, ha="right", fontsize=9)
                 ax.grid(True, axis="y", linestyle="--", alpha=0.5)
                 fig.savefig(os.path.join(plots_dir, "per_family_f1.png"), bbox_inches="tight", dpi=300)
                 fig.savefig(os.path.join(plots_dir, "per_family_f1.pdf"), bbox_inches="tight")
@@ -664,10 +768,23 @@ def generate_post_training_plots(exp_dir: str, exp_name: str, mode: str) -> None
             if isinstance(raw_mat, (list, np.ndarray)):
                 mat = np.array(raw_mat)
                 fig, ax = plt.subplots(figsize=(6, 5), dpi=300)
-                sns.heatmap(mat, annot=True, fmt=".2f", cmap="YlGnBu", ax=ax)
-                ax.set_title(f"Task Evaluation Matrix {{t,\tau}}$: {exp_name}")
-                ax.set_xlabel("Evaluated Task $\tau$")
-                ax.set_ylabel("Current Task $")
+                im = ax.imshow(mat, cmap="YlGnBu", aspect="auto", vmin=0.0, vmax=1.0)
+                cbar = fig.colorbar(im, ax=ax)
+                cbar.set_label("Metric Score", fontsize=10)
+                for i in range(mat.shape[0]):
+                    for j in range(mat.shape[1]):
+                        val = mat[i, j]
+                        if not np.isnan(val):
+                            tc = "white" if val > 0.5 else "black"
+                            ax.text(j, i, f"{val:.2f}", ha="center", va="center", color=tc, fontsize=9)
+                ax.set_title(f"Task Evaluation Matrix $(t, \\tau)$: {exp_name}", fontsize=11, fontweight="bold", pad=10)
+                ax.set_xlabel(r"Evaluated Task $\tau$", fontsize=10)
+                ax.set_ylabel(r"Current Task $t$", fontsize=10)
+                ax.set_xticks(range(mat.shape[1]))
+                ax.set_xticklabels([f"T{j+1}" for j in range(mat.shape[1])])
+                ax.set_yticks(range(mat.shape[0]))
+                ax.set_yticklabels([f"T{i+1}" for i in range(mat.shape[0])])
+                plt.tight_layout()
                 fig.savefig(os.path.join(plots_dir, "forgetting_matrix.png"), bbox_inches="tight", dpi=300)
                 fig.savefig(os.path.join(plots_dir, "forgetting_matrix.pdf"), bbox_inches="tight")
                 plt.close(fig)

@@ -187,6 +187,39 @@ ILConfig = IncrementalConfig
 
 
 @dataclass
+class DriftConfig:
+    """Configuration for FL-MalDrift drift detection and admission control.
+
+    Mirrors the hyperparameter set of Algorithm 1 (client) and Algorithm 2
+    (server) in Patel et al. (2026), "FL-MalDrift: a federated learning
+    framework for malware detection under local concept drift."
+    """
+    # Master switch
+    enabled: bool = False
+
+    # --- Detector (Algorithm 1 / Phase 1) ---
+    detector_type: str = 'hddm_w'  # 'hddm_w' | 'hddm_a' | 'adwin' | 'ddm' | 'eddm'
+
+    # --- Server dynamic threshold (Algorithm 2 / Phase 3) ---
+    window_size: int = 10        # W  — sliding window for μ/σ estimation
+    warmup_rounds: int = 3       # T₀ — warm-up period before filtering activates
+    alpha: float = 0.8           # α  — EWMA smoothing for τ_t
+    k: float = 1.5               # k  — σ multiplier for adaptive threshold
+    p_star: float = 0.7          # p* — target admission rate
+    eta: float = 0.05            # η  — correction gain for admission-rate error
+
+    # --- Client local threshold (Algorithm 1 / Phase 2) ---
+    beta: float = 0.9            # β  — EWMA smoothing for θ_{c,t}
+    lambda1: float = 0.1         # λ₁ — drift-score weight in local threshold
+    lambda2: float = 0.1         # λ₂ — epoch-count weight in local threshold
+    theta_base: float = 0.1      # θ_base — floor for local stability threshold
+
+    # --- Recovery (Phase 3) ---
+    recovery_rounds: int = 2     # R  — rounds of stable behaviour for re-admission
+    recovery_delta: float = 0.05 # δ  — score improvement required per recovery round
+
+
+@dataclass
 class ExperimentConfig:
     """Configuration for complete experiment."""
     exp_name: str = 'fcil_andmal'
@@ -196,6 +229,7 @@ class ExperimentConfig:
     model: Optional[ModelConfig] = None
     il: Optional[ILConfig] = None
     fl: Optional[FLConfig] = None
+    drift: Optional['DriftConfig'] = None
     seed: int = 42
     n_tasks: int = 5
     n_seeds: int = 3
