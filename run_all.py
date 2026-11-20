@@ -63,19 +63,23 @@ def info(text: str) -> None: print(f"  {CYN}→{RST}  {text}")
 # Each entry: (case_name, mode, method, aggregator_or_None, extra_kwargs)
 CENTRALIZED_EXPERIMENTS: List[Tuple] = [
     ("Centralized_FineTune", "centralized", "finetune", None,      {}),
-    ("Centralized_EWCDR",    "centralized", "ewc",      None,      {"ewc_lambda": 5000.0}),
+    ("Centralized_EWCDR",    "centralized", "ewc",      None,      {"ewc_lambda": 500.0}),
     ("Centralized_MES",      "centralized", "replay",   None,      {"buffer_size": 20}),
     ("Centralized_SPCIL",    "centralized", "spcil",    None,      {}),
     ("Centralized_MALFSIL",  "centralized", "malfsil",  None,      {}),
+    ("Centralized_Falcon",   "centralized", "falcon",   None,      {"buffer_size": 20}),
 ]
 
 FEDERATED_EXPERIMENTS: List[Tuple] = [
     ("FL_FedAvg",           "federated",   "finetune", "fedavg",  {}),
     ("FL_FedNova",          "federated",   "finetune", "fednova", {}),
-    ("FL_EWCDR",            "federated",   "ewc",      "fedavg",  {"ewc_lambda": 5000.0}),
+    ("FL_EWCDR",            "federated",   "ewc",      "fedavg",  {"ewc_lambda": 500.0, "enable_drift": True, "drift_detector": "page_hinkley"}),
     ("FL_MES",              "federated",   "replay",   "fedavg",  {"buffer_size": 20}),
     ("FL_SPCIL",            "federated",   "spcil",    "fedavg",  {}),
     ("FL_MALFSIL",          "federated",   "malfsil",  "fedavg",  {}),
+    ("FL_Falcon",           "federated",   "falcon",   "fedavg",  {"buffer_size": 20, "enable_drift": True, "drift_detector": "kl_drift"}),
+    ("FL_MalDrift",         "federated",   "finetune", "fedsgd",  {"enable_drift": True, "drift_detector": "hddm_a"}),
+    ("FL_MalDrift_FedAvg",  "federated",   "finetune", "fedavg",  {"enable_drift": True, "drift_detector": "hddm_a"}),
 ]
 
 # Legacy alias for backward compatibility
@@ -167,6 +171,7 @@ def ensure_dataset(
     skip: bool,
     dry: bool,
     allow_incomplete_benchmark: bool = False,
+    seed: int = SEED,
 ) -> None:
     section("STAGE 0 — Dataset Integrity Check")
 
@@ -187,12 +192,12 @@ def ensure_dataset(
                 from data.synthetic_generator import generate_synthetic_raw_andmal2020
                 generate_synthetic_raw_andmal2020(
                     root_dir=str(raw_dir), samples_per_class=350,
-                    static_dim=300, dynamic_dim=141, seed=SEED,
+                    static_dim=300, dynamic_dim=141, seed=seed,
                 )
         if not run_stage1(
             raw_dir,
             prepared_dir,
-            SEED,
+            seed,
             dry,
             synthetic_development=generate_synthetic,
             feature_type=feature_type,
@@ -214,7 +219,7 @@ def ensure_dataset(
         flags = check_dataset(prepared_dir, partition_dir, feature_type, clients_list)
         if not flags[key]:
             info(f"Running Stage 2 partitioning for K={k} ({feature_type})...")
-            if not run_stage2(prepared_dir, partition_dir, feature_type, k, SEED, dry):
+            if not run_stage2(prepared_dir, partition_dir, feature_type, k, seed, dry):
                 raise RuntimeError(f"Stage 2 partitioning (K={k}, feature={feature_type}) FAILED. Aborting.")
             ok(f"Stage 2 K={k} ({feature_type}) complete.")
         else:
@@ -239,6 +244,7 @@ def build_cmd(
     backbone: str,
     raw_root: str,
     allow_incomplete_benchmark: bool = False,
+    seed: int = SEED,
 ) -> List[str]:
     cmd = [
         sys.executable, "main.py",
@@ -251,7 +257,7 @@ def build_cmd(
         "--prepared_dir", prepared_dir,
         "--partition_dir", partition_dir,
         "--n_clients", str(n_clients),
-        "--seed", str(SEED),
+        "--seed", str(seed),
         "--device", device,
         "--exp_name", case_name,
     ]
@@ -266,7 +272,11 @@ def build_cmd(
             "--local_epochs", str(FL_LOCAL_EPOCHS),
         ]
     for k, v in extra.items():
-        cmd += [f"--{k}", str(v)]
+        if isinstance(v, bool):
+            if v:
+                cmd.append(f"--{k}")
+        else:
+            cmd += [f"--{k}", str(v)]
     return cmd
 
 
@@ -353,12 +363,13 @@ def parse_args() -> argparse.Namespace:
                    help="Client count scenarios to run (e.g. --clients 20 50 or --clients 20)")
     p.add_argument("--feature_type",     type=str, choices=["dynamic", "static", "fused"], default="dynamic",
                    help="Feature representation type: dynamic (141d), static (300d), or fused multi-modal (441d)")
-    p.add_argument("--backbone",         type=str, choices=["hybrid_tcn_cnn", "cnn1d", "tcn", "mlp", "fused"], default=None,
+    p.add_argument("--backbone",         type=str, choices=["hybrid_tcn_cnn", "cnn1d", "tcn", "mlp", "fused", "cnn_bilstm_attention", "falcon"], default=None,
                    help="Neural backbone architecture (auto-selects based on feature_type if None)")
     p.add_argument("--raw_root",        default="./raw_data",          help="Raw CIC-AndMal-2020 directory")
     p.add_argument("--prepared_dir",    default="./prepared_data",     help="Stage 1 prepared data dir")
     p.add_argument("--partition_dir",   default="./fl_data_partitions",help="Stage 2 FL partitions dir")
     p.add_argument("--output_root",     default="./EXPERIMENT",        help="Output root for results")
+    p.add_argument("--seed",            type=int, default=SEED,        help="Master random seed for data prep, partitioning, and training")
     p.add_argument("--device",          default="auto",                help="PyTorch device ('auto', 'mps', 'cuda', 'cpu')")
     p.add_argument("--allow_incomplete_benchmark", action="store_true", default=False,
                    help="Allow execution when configured classes (e.g. Benign in dynamic) are absent")
@@ -411,6 +422,7 @@ def main() -> None:
     else:
         info("Execution device: CPU")
     info(f"Output   : {args.output_root}")
+    info(f"Seed     : {args.seed}")
     info(f"Feature  : {args.feature_type}")
     info(f"Backbone : {backbone}")
     info(f"Clients  : {args.clients} clients scenario(s)")
@@ -486,6 +498,7 @@ def main() -> None:
         skip=args.skip_data_prep,
         dry=args.dry_run,
         allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+        seed=args.seed,
     )
 
     overall_all_passed = True
@@ -538,6 +551,7 @@ def main() -> None:
                     backbone=backbone,
                     raw_root=str(raw_dir),
                     allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+                    seed=args.seed,
                 )
 
                 success, elapsed = run_experiment(case_name, cmd, log_dir, args.dry_run)
@@ -611,6 +625,7 @@ def main() -> None:
                         backbone=backbone,
                         raw_root=str(raw_dir),
                         allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+                        seed=args.seed,
                     )
 
                     success, elapsed = run_experiment(full_case_tag, cmd, log_dir, args.dry_run)

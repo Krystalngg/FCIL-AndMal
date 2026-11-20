@@ -11,6 +11,7 @@ from methods.replay import ReplayHerdingMethod
 from methods.spcil import SPCILMethod
 from methods.malfscil import MalFSCILMethod
 from methods.malfsil import MALFSILMethod
+from methods.falcon import FalconMethod
 
 
 def build_il_method(config: ILConfig) -> BaseILMethod:
@@ -20,8 +21,13 @@ def build_il_method(config: ILConfig) -> BaseILMethod:
         return FineTuneMethod()
     elif m_name == "joint":
         return JointCumulativeMethod()
-    elif m_name == "ewc":
-        return EWCMethod(ewc_lambda=config.ewc_lambda)
+    elif m_name in ("ewc", "ewcdr", "fl_cl_ids"):
+        return EWCMethod(
+            ewc_lambda=getattr(config, "ewc_lambda", 100.0),
+            gamma=getattr(config, "fisher_gamma", 0.9),
+            lambda_min=getattr(config, "lambda_min", 10.0),
+            lambda_max=getattr(config, "lambda_max", 1000.0),
+        )
     elif m_name == "lwf":
         return LwFMethod(temperature=config.lwf_temperature, alpha=config.lwf_alpha)
     elif m_name == "replay":
@@ -44,6 +50,18 @@ def build_il_method(config: ILConfig) -> BaseILMethod:
             proto_weight=getattr(config, "malfsil_proto_weight", 0.5),
             temperature=getattr(config, "lwf_temperature", 2.0),
         )
+    elif m_name == "falcon":
+        return FalconMethod(
+            buffer_size_per_class=getattr(config, "replay_buffer_size_per_class", 20),
+            replay_ratio=getattr(config, "falcon_replay_ratio", 0.2),
+            alpha_cls=getattr(config, "falcon_alpha", 1.0),
+            beta_old=getattr(config, "falcon_beta", 1.0),
+            gamma_new=getattr(config, "falcon_gamma", 0.5),
+            temperature=getattr(config, "falcon_temperature", 2.0),
+            focal_gamma=getattr(config, "focal_gamma", 2.0),
+            focal_alpha=getattr(config, "focal_alpha", 1.0),
+            use_herding=getattr(config, "herding", True),
+        )
     else:
         raise ValueError(f"Unknown IL method name: {config.method_name}")
 
@@ -58,5 +76,6 @@ __all__ = [
     "SPCILMethod",
     "MalFSCILMethod",
     "MALFSILMethod",
+    "FalconMethod",
     "build_il_method",
 ]

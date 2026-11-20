@@ -69,8 +69,10 @@ def parse_args():
     # Feature representation & Dataset
     parser.add_argument("--feature_type", type=str, choices=["dynamic", "static", "fused"], default="dynamic",
                         help="Feature representation: dynamic (141/282d), static (reduced 300d), or fused (441d)")
-    parser.add_argument("--backbone", type=str, choices=["hybrid_tcn_cnn", "cnn1d", "tcn", "mlp", "fused"], default="hybrid_tcn_cnn",
-                        help="Neural backbone architecture: 'hybrid_tcn_cnn' (Primary TCN+CNN), 'cnn1d', 'tcn', 'mlp', or 'fused'")
+    parser.add_argument("--backbone", type=str,
+                        choices=["hybrid_tcn_cnn", "cnn1d", "tcn", "mlp", "fused", "cnn_bilstm_attention", "falcon"],
+                        default="hybrid_tcn_cnn",
+                        help="Neural backbone architecture: 'hybrid_tcn_cnn', 'cnn_bilstm_attention' (Falcon), 'cnn1d', 'tcn', 'mlp', or 'fused'")
     parser.add_argument("--raw_root", type=str, default="./raw_data",
                         help="Path to raw CIC-AndMal-2020 directory")
     parser.add_argument("--prepared_dir", type=str, default="./prepared_data",
@@ -85,13 +87,25 @@ def parse_args():
                         help="Prepare, validate, and partition data without starting training")
 
     # Incremental Learning & Methods
-    parser.add_argument("--method", type=str, choices=["finetune", "joint", "ewc", "lwf", "replay", "spcil", "malfscil", "malfsil"],
+    parser.add_argument("--method", type=str,
+                        choices=["finetune", "joint", "ewc", "ewcdr", "fl_cl_ids", "lwf", "replay", "spcil", "malfscil", "malfsil", "falcon"],
                         default="malfscil", help="Class-Incremental Learning method")
     parser.add_argument("--ewc_lambda", type=float, default=5000.0, help="Fisher information loss weight for EWC")
     parser.add_argument("--lwf_temp", type=float, default=2.0, help="Distillation temperature for LwF")
     parser.add_argument("--lwf_alpha", type=float, default=1.0, help="Distillation loss scale for LwF")
     parser.add_argument("--buffer_size", type=int, default=20, choices=[5, 20, 50],
-                        help="Exemplar replay buffer size m samples/class for Replay")
+                        help="Exemplar replay buffer size m samples/class for Replay / Falcon")
+    # Falcon parameters (Yang et al., IEEE TCE 2026)
+    falcon_grp = parser.add_argument_group("Falcon incremental & focal learning (Yang et al. 2026)")
+    falcon_grp.add_argument("--falcon_alpha", type=float, default=1.0, help="Falcon classification loss weight alpha")
+    falcon_grp.add_argument("--falcon_beta", type=float, default=1.0, help="Falcon historical teacher distillation weight beta")
+    falcon_grp.add_argument("--falcon_gamma", type=float, default=0.5, help="Falcon new-class teacher distillation weight gamma")
+    falcon_grp.add_argument("--falcon_temp", type=float, default=2.0, help="Falcon distillation temperature")
+    falcon_grp.add_argument("--falcon_replay_ratio", type=float, default=0.2, help="Falcon memory replay batch mix ratio delta")
+    falcon_grp.add_argument("--focal_gamma", type=float, default=2.0, help="Focal loss focusing parameter gamma")
+    falcon_grp.add_argument("--focal_alpha", type=float, default=1.0, help="Focal loss class weighting factor alpha")
+    falcon_grp.add_argument("--use_balanced_sampler", action="store_true", default=False,
+                            help="Enable Falcon BalancedBatchSampler for per-class quota mini-batches")
     parser.add_argument("--fscil_k_shot", type=int, default=5,
                         help="Labeled examples available per new class")
     parser.add_argument("--fscil_n_way", type=int, default=3,
@@ -108,8 +122,8 @@ def parse_args():
     parser.add_argument("--malfscil_arc_margin", type=float, default=0.5)
 
     # Federated Learning
-    parser.add_argument("--aggregator", type=str, choices=["fedavg", "fednova"], default="fedavg",
-                        help="Federated aggregation algorithm")
+    parser.add_argument("--aggregator", type=str, choices=["fedavg", "fednova", "fedsgd"], default="fedavg",
+                        help="Federated aggregation algorithm ('fedavg', 'fednova', or 'fedsgd')")
     parser.add_argument("--n_clients", type=int, default=20, choices=[20, 50, 100],
                         help="Total candidate FL clients (participation scales dynamically per task)")
     parser.add_argument("--dirichlet_alpha", type=float, default=0.5,
@@ -143,8 +157,8 @@ def parse_args():
     )
     drift_grp.add_argument(
         "--drift_detector", type=str, default="hddm_w",
-        choices=["hddm_w", "hddm_a", "adwin", "ddm", "eddm"],
-        help="Drift detector algorithm used client-side (Algorithm 1)"
+        choices=["page_hinkley", "hddm_w", "hddm_a", "adwin", "ddm", "eddm", "kl_drift"],
+        help="Drift detector algorithm used client-side ('page_hinkley' for FL-CL-IDS/EWCDR; 'kl_drift' for Falcon)"
     )
     drift_grp.add_argument(
         "--drift_k", type=float, default=1.5,
@@ -178,6 +192,36 @@ def parse_args():
         "--drift_window", type=int, default=10,
         help="Sliding window size W for server μ/σ estimation (Algorithm 2)"
     )
+    drift_grp.add_argument(
+        "--divergence_metric", type=str, default="l2", choices=["l2", "cosine"],
+        help="Parameter divergence metric d_{c,t} ('l2' or 'cosine', Patel et al. 2026 Sec. 4.3)"
+    )
+    drift_grp.add_argument(
+        "--dp_sigma", type=float, default=0.0,
+        help="Optional Gaussian Differential Privacy noise std σ on client updates and drift scores (0.0 = off)"
+    )
+    drift_grp.add_argument(
+        "--dp_clip_norm", type=float, default=1.0,
+        help="L2 sensitivity clipping norm C before Gaussian DP noise injection"
+    )
+
+    # FL-CL-IDS Page-Hinkley & Adaptive Lambda (Khreasat & Villarrubia González, IEEE Access 2026)
+    flcl_grp = parser.add_argument_group("FL-CL-IDS covariate drift & adaptive EWC (Khreasat et al. 2026)")
+    flcl_grp.add_argument("--delta_ph", type=float, default=0.005, help="Page-Hinkley magnitude tolerance δ_PH (Eq. 10)")
+    flcl_grp.add_argument("--lambda_ph", type=float, default=50.0, help="Page-Hinkley detection threshold λ_PH (Eq. 12)")
+    flcl_grp.add_argument("--tau_low", type=float, default=0.05, help="Low drift threshold τ_low / round-skip trigger (Eq. 5)")
+    flcl_grp.add_argument("--tau_high", type=float, default=0.30, help="High drift threshold τ_high (Eq. 5)")
+    flcl_grp.add_argument("--lambda_min", type=float, default=10.0, help="Minimum adaptive EWC regularization λ_min (Eq. 5)")
+    flcl_grp.add_argument("--lambda_max", type=float, default=1000.0, help="Maximum adaptive EWC regularization λ_max (Eq. 5)")
+    flcl_grp.add_argument("--rho_min", type=float, default=0.50, help="Minimum client participation floor ρ_min (Algorithm 1)")
+    flcl_grp.add_argument("--fisher_gamma", type=float, default=0.90, help="Online Fisher consolidation decay factor γ (Eq. 14)")
+
+    # Falcon KL/JS Drift Detection (Yang et al., IEEE TCE 2026)
+    falcon_drift_grp = parser.add_argument_group("Falcon histogram KL/JS drift detector (Yang et al. 2026)")
+    falcon_drift_grp.add_argument("--kl_window_size", type=int, default=500, help="Sliding reference/test window size w (Algorithm 2)")
+    falcon_drift_grp.add_argument("--kl_n_bins", type=int, default=20, help="Histogram bin count B per feature (Eq. 20)")
+    falcon_drift_grp.add_argument("--tau_kl", type=float, default=0.15, help="KL-divergence drift alarm threshold τ_KL (Eq. 20)")
+    falcon_drift_grp.add_argument("--tau_js", type=float, default=0.10, help="Jensen-Shannon backup threshold τ_JS (Eq. 21)")
 
     return parser.parse_args()
 
@@ -214,7 +258,8 @@ def build_configs_from_args(args) -> ExperimentConfig:
         classes_per_task=3
     )
 
-    method_name = args.method  # malfsil and malfscil are now distinct methods
+    raw_method = args.method.lower()
+    method_name = "ewc" if raw_method in ("ewcdr", "fl_cl_ids") else raw_method
 
     il_cfg = ILConfig(
         method_name=method_name,
@@ -230,6 +275,13 @@ def build_configs_from_args(args) -> ExperimentConfig:
         malfscil_arc_weight=args.malfscil_arc_weight,
         malfscil_arc_scale=args.malfscil_arc_scale,
         malfscil_arc_margin=args.malfscil_arc_margin,
+        falcon_alpha=args.falcon_alpha,
+        falcon_beta=args.falcon_beta,
+        falcon_gamma=args.falcon_gamma,
+        falcon_temperature=args.falcon_temp,
+        falcon_replay_ratio=args.falcon_replay_ratio,
+        focal_gamma=args.focal_gamma,
+        focal_alpha=args.focal_alpha,
     )
 
     batch_size = get_batch_size_for_mode(args.mode)
@@ -252,12 +304,22 @@ def build_configs_from_args(args) -> ExperimentConfig:
         device=str(resolved_dev),
     )
 
-    # --- FL-MalDrift drift config (additive; None when drift is disabled) ---
+    # --- FL-CL-IDS / Falcon / FL-MalDrift drift config ---
     drift_cfg: Optional[DriftConfig] = None
-    if getattr(args, 'enable_drift', False):
+    auto_ewcdr = (
+        args.mode == "federated"
+        and (
+            raw_method in ("ewcdr", "fl_cl_ids")
+            or (method_name == "ewc" and "EWCDR" in args.exp_name.upper())
+        )
+    )
+    if getattr(args, 'enable_drift', False) or auto_ewcdr:
+        det_type = getattr(args, 'drift_detector', 'hddm_w')
+        if auto_ewcdr and not getattr(args, 'enable_drift', False):
+            det_type = "page_hinkley"
         drift_cfg = DriftConfig(
             enabled=True,
-            detector_type=getattr(args, 'drift_detector', 'hddm_w'),
+            detector_type=det_type,
             window_size=getattr(args, 'drift_window', 10),
             warmup_rounds=getattr(args, 'drift_warmup', 3),
             alpha=getattr(args, 'drift_alpha', 0.8),
@@ -266,6 +328,21 @@ def build_configs_from_args(args) -> ExperimentConfig:
             eta=getattr(args, 'drift_eta', 0.05),
             beta=getattr(args, 'drift_beta', 0.9),
             theta_base=getattr(args, 'drift_theta_base', 0.1),
+            delta_ph=getattr(args, 'delta_ph', 0.005),
+            lambda_ph=getattr(args, 'lambda_ph', 50.0),
+            tau_low=getattr(args, 'tau_low', 0.05),
+            tau_high=getattr(args, 'tau_high', 0.30),
+            lambda_min=getattr(args, 'lambda_min', 10.0),
+            lambda_max=getattr(args, 'lambda_max', 1000.0),
+            rho_min=getattr(args, 'rho_min', 0.50),
+            fisher_gamma=getattr(args, 'fisher_gamma', 0.90),
+            kl_window_size=getattr(args, 'kl_window_size', 500),
+            kl_n_bins=getattr(args, 'kl_n_bins', 20),
+            tau_kl=getattr(args, 'tau_kl', 0.15),
+            tau_js=getattr(args, 'tau_js', 0.10),
+            divergence_metric=getattr(args, 'divergence_metric', 'l2'),
+            dp_sigma=getattr(args, 'dp_sigma', 0.0),
+            dp_clip_norm=getattr(args, 'dp_clip_norm', 1.0),
         )
 
     if args.mode == "federated":
@@ -534,6 +611,7 @@ def main():
             device=resolved_device,
             config=exp_cfg,
             evaluator=evaluator,
+            validation_evaluator=validation_evaluator,
             logger=logger,
             checkpoint_manager=ckpt_mgr,
             enable_drift_filtering=(exp_cfg.drift is not None and exp_cfg.drift.enabled),
@@ -557,12 +635,30 @@ def main():
                 device=resolved_device,
                 classes_per_task=exp_cfg.model.classes_per_task,
             )
-            # --- FL-MalDrift: per-client drift detector & normalizer (Algorithm 1) ---
+            # --- FL-MalDrift / FL-CL-IDS / Falcon: per-client drift detector & normalizer ---
             _drift_detector = None
             _drift_normalizer = None
             if exp_cfg.drift is not None and exp_cfg.drift.enabled:
                 from federated.drift import build_drift_detector, DriftScoreNormalizer
-                _drift_detector = build_drift_detector(exp_cfg.drift.detector_type)
+                det_name = exp_cfg.drift.detector_type.lower()
+                if det_name in ("page_hinkley", "ph"):
+                    _drift_detector = build_drift_detector(
+                        det_name,
+                        delta=exp_cfg.drift.delta_ph,
+                        lambda_ph=exp_cfg.drift.lambda_ph,
+                        tau_low=exp_cfg.drift.tau_low,
+                        tau_high=exp_cfg.drift.tau_high,
+                    )
+                elif det_name in ("kl_drift", "kl", "falcon_kl"):
+                    _drift_detector = build_drift_detector(
+                        det_name,
+                        window_size=exp_cfg.drift.kl_window_size,
+                        n_bins=exp_cfg.drift.kl_n_bins,
+                        tau_kl=exp_cfg.drift.tau_kl,
+                        tau_js=exp_cfg.drift.tau_js,
+                    )
+                else:
+                    _drift_detector = build_drift_detector(det_name)
                 _drift_normalizer = DriftScoreNormalizer()
             client = FLClient(
                 client_id=client_id,
@@ -571,6 +667,13 @@ def main():
                 device=resolved_device,
                 drift_detector=_drift_detector,
                 drift_normalizer=_drift_normalizer,
+                theta_base=exp_cfg.drift.theta_base if exp_cfg.drift is not None else 0.1,
+                beta=exp_cfg.drift.beta if exp_cfg.drift is not None else 0.9,
+                lambda1=exp_cfg.drift.lambda1 if exp_cfg.drift is not None else 0.1,
+                lambda2=exp_cfg.drift.lambda2 if exp_cfg.drift is not None else 0.1,
+                divergence_metric=exp_cfg.drift.divergence_metric if exp_cfg.drift is not None else 'l2',
+                dp_sigma=exp_cfg.drift.dp_sigma if exp_cfg.drift is not None else 0.0,
+                dp_clip_norm=exp_cfg.drift.dp_clip_norm if exp_cfg.drift is not None else 1.0,
             )
             server.register_client(client)
 
@@ -596,13 +699,22 @@ def main():
                 y_c = np.array([LABEL2ID.get(lbl, -1) for lbl in df_c["label"].values], dtype=np.int64)
                 del df_c
                 ds_c = TabularMalwareDataset(X_c, y_c)
-                drop_last = len(ds_c) > exp_cfg.fl.batch_size and (len(ds_c) % exp_cfg.fl.batch_size == 1)
-                train_loaders[cid] = DataLoader(
-                    ds_c,
-                    batch_size=exp_cfg.fl.batch_size,
-                    shuffle=True,
-                    drop_last=drop_last,
-                )
+                if getattr(args, "use_balanced_sampler", False) or args.method == "falcon":
+                    from data.sampler import BalancedBatchSampler
+                    sampler = BalancedBatchSampler(
+                        labels=y_c,
+                        batch_size=exp_cfg.fl.batch_size,
+                        seed=args.seed + task_id * 100 + cid,
+                    )
+                    train_loaders[cid] = DataLoader(ds_c, batch_sampler=sampler)
+                else:
+                    drop_last = len(ds_c) > exp_cfg.fl.batch_size and (len(ds_c) % exp_cfg.fl.batch_size == 1)
+                    train_loaders[cid] = DataLoader(
+                        ds_c,
+                        batch_size=exp_cfg.fl.batch_size,
+                        shuffle=True,
+                        drop_last=drop_last,
+                    )
 
             task_metrics = server.run_task(
                 task_id=task_id,
@@ -629,6 +741,7 @@ def main():
             "all_task_results": all_task_results,
             "continual_matrix": evaluator.continual_matrix.get_summary_dict(),
         }
+        logger.log_final_results(final_results["continual_matrix"])
         export_experiment_results(
             workbook_path=os.path.join(exp_cfg.output_root, "evaluation_results.xlsx"),
             experiment_name=exp_cfg.exp_name,

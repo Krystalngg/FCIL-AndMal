@@ -168,6 +168,14 @@ class IncrementalConfig:
     malfsil_proto_weight: float = 0.1
     malfsil_margin: float = 1.0
     malfsil_prototype_weight: float = 0.1
+    # Falcon parameters (Yang et al., IEEE TCE 2026)
+    falcon_alpha: float = 1.0
+    falcon_beta: float = 1.0
+    falcon_gamma: float = 0.5
+    falcon_temperature: float = 2.0
+    falcon_replay_ratio: float = 0.2
+    focal_gamma: float = 2.0
+    focal_alpha: float = 1.0
 
     def __post_init__(self):
         # NOTE: 'malfsil' and 'malfscil' are intentionally distinct methods:
@@ -217,6 +225,27 @@ class DriftConfig:
     # --- Recovery (Phase 3) ---
     recovery_rounds: int = 2     # R  — rounds of stable behaviour for re-admission
     recovery_delta: float = 0.05 # δ  — score improvement required per recovery round
+
+    # --- FL-CL-IDS Page-Hinkley & Adaptive Lambda (Khreasat et al., IEEE Access 2026) ---
+    delta_ph: float = 0.005      # δ  — Page-Hinkley magnitude tolerance (Eq. 10)
+    lambda_ph: float = 50.0      # λ_PH — Page-Hinkley detection threshold (Eq. 12)
+    tau_low: float = 0.05        # τ_low — low drift threshold / round-skip trigger (Eq. 5)
+    tau_high: float = 0.30       # τ_high — high drift threshold (Eq. 5)
+    lambda_min: float = 10.0     # λ_min — minimum EWC regularization (plasticity)
+    lambda_max: float = 1000.0   # λ_max — maximum EWC regularization (stability)
+    rho_min: float = 0.50        # ρ_min — minimum client participation floor (Algorithm 1)
+    fisher_gamma: float = 0.90   # γ — Online Fisher consolidation decay factor (Eq. 14)
+
+    # --- Falcon Histogram KL/JS Drift Detection (Yang et al., IEEE TCE 2026) ---
+    kl_window_size: int = 500    # w — sliding reference/test window size (Algorithm 2)
+    kl_n_bins: int = 20          # B — histogram bins per feature (Eq. 20)
+    tau_kl: float = 0.15         # τ_KL — KL-divergence drift alarm threshold (Eq. 20)
+    tau_js: float = 0.10         # τ_JS — Jensen-Shannon backup threshold (Eq. 21)
+
+    # --- FL-MalDrift Divergence Metric & Optional Differential Privacy (Patel et al., 2026) ---
+    divergence_metric: str = 'l2'  # 'l2' | 'cosine' parameter divergence metric (Sec. 4.3)
+    dp_sigma: float = 0.0        # σ — Gaussian DP noise std on client updates/scores (0.0 = off)
+    dp_clip_norm: float = 1.0    # C — L2 norm clipping threshold before Gaussian DP noise
 
 
 @dataclass
