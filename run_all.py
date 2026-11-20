@@ -171,6 +171,7 @@ def ensure_dataset(
     skip: bool,
     dry: bool,
     allow_incomplete_benchmark: bool = False,
+    seed: int = SEED,
 ) -> None:
     section("STAGE 0 — Dataset Integrity Check")
 
@@ -191,12 +192,12 @@ def ensure_dataset(
                 from data.synthetic_generator import generate_synthetic_raw_andmal2020
                 generate_synthetic_raw_andmal2020(
                     root_dir=str(raw_dir), samples_per_class=350,
-                    static_dim=300, dynamic_dim=141, seed=SEED,
+                    static_dim=300, dynamic_dim=141, seed=seed,
                 )
         if not run_stage1(
             raw_dir,
             prepared_dir,
-            SEED,
+            seed,
             dry,
             synthetic_development=generate_synthetic,
             feature_type=feature_type,
@@ -218,7 +219,7 @@ def ensure_dataset(
         flags = check_dataset(prepared_dir, partition_dir, feature_type, clients_list)
         if not flags[key]:
             info(f"Running Stage 2 partitioning for K={k} ({feature_type})...")
-            if not run_stage2(prepared_dir, partition_dir, feature_type, k, SEED, dry):
+            if not run_stage2(prepared_dir, partition_dir, feature_type, k, seed, dry):
                 raise RuntimeError(f"Stage 2 partitioning (K={k}, feature={feature_type}) FAILED. Aborting.")
             ok(f"Stage 2 K={k} ({feature_type}) complete.")
         else:
@@ -243,6 +244,7 @@ def build_cmd(
     backbone: str,
     raw_root: str,
     allow_incomplete_benchmark: bool = False,
+    seed: int = SEED,
 ) -> List[str]:
     cmd = [
         sys.executable, "main.py",
@@ -255,7 +257,7 @@ def build_cmd(
         "--prepared_dir", prepared_dir,
         "--partition_dir", partition_dir,
         "--n_clients", str(n_clients),
-        "--seed", str(SEED),
+        "--seed", str(seed),
         "--device", device,
         "--exp_name", case_name,
     ]
@@ -367,6 +369,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prepared_dir",    default="./prepared_data",     help="Stage 1 prepared data dir")
     p.add_argument("--partition_dir",   default="./fl_data_partitions",help="Stage 2 FL partitions dir")
     p.add_argument("--output_root",     default="./EXPERIMENT",        help="Output root for results")
+    p.add_argument("--seed",            type=int, default=SEED,        help="Master random seed for data prep, partitioning, and training")
     p.add_argument("--device",          default="auto",                help="PyTorch device ('auto', 'mps', 'cuda', 'cpu')")
     p.add_argument("--allow_incomplete_benchmark", action="store_true", default=False,
                    help="Allow execution when configured classes (e.g. Benign in dynamic) are absent")
@@ -419,6 +422,7 @@ def main() -> None:
     else:
         info("Execution device: CPU")
     info(f"Output   : {args.output_root}")
+    info(f"Seed     : {args.seed}")
     info(f"Feature  : {args.feature_type}")
     info(f"Backbone : {backbone}")
     info(f"Clients  : {args.clients} clients scenario(s)")
@@ -494,6 +498,7 @@ def main() -> None:
         skip=args.skip_data_prep,
         dry=args.dry_run,
         allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+        seed=args.seed,
     )
 
     overall_all_passed = True
@@ -546,6 +551,7 @@ def main() -> None:
                     backbone=backbone,
                     raw_root=str(raw_dir),
                     allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+                    seed=args.seed,
                 )
 
                 success, elapsed = run_experiment(case_name, cmd, log_dir, args.dry_run)
@@ -619,6 +625,7 @@ def main() -> None:
                         backbone=backbone,
                         raw_root=str(raw_dir),
                         allow_incomplete_benchmark=args.allow_incomplete_benchmark,
+                        seed=args.seed,
                     )
 
                     success, elapsed = run_experiment(full_case_tag, cmd, log_dir, args.dry_run)
